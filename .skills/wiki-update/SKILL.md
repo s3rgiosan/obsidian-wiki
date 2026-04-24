@@ -13,10 +13,12 @@ You are distilling knowledge from the current project into the user's Obsidian w
 
 ## Before You Start
 
-1. Read `~/.obsidian-wiki/config` to get:
-   - `OBSIDIAN_VAULT_PATH` — where the wiki lives
-   - `OBSIDIAN_WIKI_REPO` — where the obsidian-wiki repo is cloned (for reading other skills if needed)
-2. If `~/.obsidian-wiki/config` doesn't exist, tell the user to run `bash setup.sh` from their obsidian-wiki repo first.
+1. Resolve the right config file:
+   - Check `$CLAUDE_CONFIG_DIR` env var (Claude Code sets this for non-default instances)
+   - Scan `~/.obsidian-wiki/config*` files for the one whose `CLAUDE_HISTORY_PATH` matches `$CLAUDE_CONFIG_DIR`
+   - Fall back to `~/.obsidian-wiki/config` if no match or env var unset
+   - Read `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_WIKI_REPO` from the resolved file
+2. If no config file exists, tell the user to set `CLAUDE_HISTORY_PATH` in `.env` and run `bash setup.sh`.
 3. Read `$OBSIDIAN_VAULT_PATH/.manifest.json` to check if this project has been synced before.
 4. Read `$OBSIDIAN_VAULT_PATH/index.md` to know what the wiki already contains.
 

@@ -4,12 +4,16 @@ A **skill-based framework** for building and maintaining an Obsidian knowledge b
 
 ## Configuration
 
-Read config in this order (first found wins):
+Skills running cross-project resolve config in this order:
 
-1. **`~/.obsidian-wiki/config`** — global config, works from any project directory
-2. **`.env`** in the obsidian-wiki repo — local fallback
+1. Check `$CLAUDE_CONFIG_DIR` env var (set by Claude Code when using a non-default instance).
+2. Scan `~/.obsidian-wiki/config*` files for the one where `CLAUDE_HISTORY_PATH` matches `$CLAUDE_CONFIG_DIR`.
+3. Fall back to `~/.obsidian-wiki/config` (the default instance config).
+4. Fall back to `.env` in the obsidian-wiki repo (local use only).
 
-Both files set `OBSIDIAN_VAULT_PATH` (where the wiki lives). The global config also sets `OBSIDIAN_WIKI_REPO` (where this repo is cloned).
+All config files store `OBSIDIAN_VAULT_PATH`, `OBSIDIAN_WIKI_REPO`, and `CLAUDE_HISTORY_PATH`.
+
+**Writing config files:** `setup.sh` reads `CLAUDE_HISTORY_PATH` and `CLAUDE_PROFILE` from `.env`. If `CLAUDE_PROFILE` is set it writes `~/.obsidian-wiki/config.<profile>`; otherwise `~/.obsidian-wiki/config`. The config file stores `CLAUDE_HISTORY_PATH` so skills can match it at runtime.
 
 ## Vault Structure
 

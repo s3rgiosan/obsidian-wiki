@@ -15,7 +15,12 @@ You are answering questions against a compiled Obsidian wiki, not raw source doc
 
 ## Before You Start
 
-1. Read `~/.obsidian-wiki/config` to get `OBSIDIAN_VAULT_PATH` (works from any project). Fall back to `.env` if you're inside the obsidian-wiki repo.
+1. Resolve the right config file:
+   - Check `$CLAUDE_CONFIG_DIR` env var (Claude Code sets this for non-default instances)
+   - Scan `~/.obsidian-wiki/config*` files for the one whose `CLAUDE_HISTORY_PATH` matches `$CLAUDE_CONFIG_DIR`
+   - Fall back to `~/.obsidian-wiki/config` if no match or env var unset
+   - Fall back to `.env` (when inside the obsidian-wiki repo)
+   - Read `OBSIDIAN_VAULT_PATH` from the resolved file
 2. Read `$OBSIDIAN_VAULT_PATH/index.md` to understand the wiki's scope and structure
 
 ## Visibility Filter (optional)

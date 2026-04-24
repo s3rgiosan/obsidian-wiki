@@ -44,7 +44,7 @@ This framework works with **any AI coding agent** that can read files. The `setu
 
 | Agent                                                     | Bootstrap Files                                                           | Skills Directory                                  | Slash Commands                                                   |
 | --------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------- | ---------------------------------------------------------------- |
-| **[Claude Code](https://claude.ai/code)**                 | `CLAUDE.md`                                                               | `.claude/skills/` + `~/.claude/skills/` (portable) | ✅ `/wiki-ingest`, `/wiki-status`, etc.                          |
+| **[Claude Code](https://claude.ai/code)**                 | `CLAUDE.md`                                                               | `.claude/skills/` + `$CLAUDE_HISTORY_PATH/skills/` (portable) | ✅ `/wiki-ingest`, `/wiki-status`, etc.                          |
 | **[Cursor](https://cursor.com)**                          | `.cursor/rules/obsidian-wiki.mdc`                                         | `.cursor/skills/`                                 | ✅ `/wiki-ingest`, `/wiki-status`, etc.                          |
 | **[Windsurf](https://windsurf.com)**                      | `.windsurf/rules/obsidian-wiki.md`                                        | `.windsurf/skills/`                               | ✅ via Cascade                                                   |
 | **[Codex (OpenAI)](https://openai.com/codex)**            | `AGENTS.md`                                                               | `~/.codex/skills/`                                | `$wiki-ingest` (Codex uses `$`)                                  |
@@ -443,7 +443,7 @@ obsidian-wiki/
 ├── .agents/skills/   → symlinks to .skills/*  (created by setup.sh)
 ├── .kiro/skills/     → symlinks to .skills/*  (created by setup.sh)
 │
-├── ~/.claude/skills/              → portable skills (wiki-update, wiki-query)
+├── $CLAUDE_HISTORY_PATH/skills/   → portable skills (wiki-update, wiki-query)
 ├── ~/.gemini/skills/              → global symlinks — Gemini CLI
 ├── ~/.gemini/antigravity/skills/  → global symlinks — Antigravity (legacy path)
 ├── ~/.codex/skills/               → global symlinks — Codex
@@ -467,8 +467,8 @@ The whole point is that your wiki should stay up to date as you work across diff
 
 When you run `bash setup.sh`, it does the following:
 
-1. Writes a config to `~/.obsidian-wiki/config` with your vault path and the repo location. This is how the skills know where to read and write.
-2. Symlinks `wiki-update` and `wiki-query` into `~/.claude/skills/` so they're available everywhere in Claude Code.
+1. Writes a config to `~/.obsidian-wiki/config` (or `~/.obsidian-wiki/config.<profile>` if `CLAUDE_PROFILE` is set in `.env`) with your vault path, repo location, and `CLAUDE_HISTORY_PATH`. This is how cross-project skills know which vault to read and write.
+2. Symlinks `wiki-update` and `wiki-query` into `$CLAUDE_HISTORY_PATH/skills/` (defaults to `~/.claude/skills/`) so they're available everywhere in Claude Code.
 3. Symlinks all skills into every agent's global discovery path:
    - `~/.gemini/skills/` — Gemini CLI (canonical)
    - `~/.gemini/antigravity/skills/` — Google Antigravity (legacy)

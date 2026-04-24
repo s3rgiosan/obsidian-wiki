@@ -37,7 +37,7 @@ The manifest lives at `$OBSIDIAN_VAULT_PATH/.manifest.json`. It tracks every sou
       "pages_created": ["concepts/transformers.md"],
       "pages_updated": ["entities/vaswani.md"]
     },
-    "~/.claude/projects/-Users-name-my-app/abc123.jsonl": {
+    "$CLAUDE_HISTORY_PATH/projects/-Users-name-my-app/abc123.jsonl": {
       "ingested_at": "2026-04-06T11:00:00Z",
       "size_bytes": 128000,
       "modified_at": "2026-04-06T09:00:00Z",
@@ -49,7 +49,7 @@ The manifest lives at `$OBSIDIAN_VAULT_PATH/.manifest.json`. It tracks every sou
   },
   "projects": {
     "my-app": {
-      "source_path": "~/.claude/projects/-Users-name-my-app",
+      "source_path": "$CLAUDE_HISTORY_PATH/projects/-Users-name-my-app",
       "vault_path": "projects/my-app",
       "last_ingested": "2026-04-06T11:00:00Z",
       "conversations_ingested": 5,
@@ -78,9 +78,9 @@ Record: path, size, modification time
 
 ### Claude History (from `CLAUDE_HISTORY_PATH`)
 ```
-Glob: ~/.claude/projects/*/          → project directories
-Glob: ~/.claude/projects/*/*.jsonl   → conversation files
-Glob: ~/.claude/projects/*/memory/*.md → memory files
+Glob: $CLAUDE_HISTORY_PATH/projects/*/          → project directories
+Glob: $CLAUDE_HISTORY_PATH/projects/*/*.jsonl   → conversation files
+Glob: $CLAUDE_HISTORY_PATH/projects/*/memory/*.md → memory files
 Record: path, size, modification time, parent project
 ```
 
@@ -111,7 +111,7 @@ Compare current sources against the manifest. Classify each source file:
 When a manifest entry has no `content_hash` (older entry), fall back to mtime comparison only.
 
 For Claude history specifically, also compute:
-- New projects (directories in `~/.claude/projects/` not in manifest)
+- New projects (directories in `$CLAUDE_HISTORY_PATH/projects/` not in manifest)
 - New conversations within existing projects
 - Updated memory files
 
@@ -147,7 +147,7 @@ Present a clear summary:
 | Source | Type | Size |
 |---|---|---|
 | ~/Documents/research/new-paper.pdf | document | 2.1 MB |
-| ~/.claude/projects/-Users-.../session-xyz.jsonl | claude_conversation | 340 KB |
+| $CLAUDE_HISTORY_PATH/projects/-Users-.../session-xyz.jsonl | claude_conversation | 340 KB |
 | ~/.codex/sessions/2026/04/12/rollout-...jsonl | codex_rollout | 220 KB |
 | ... | | |
 

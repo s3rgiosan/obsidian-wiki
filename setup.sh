@@ -6,7 +6,7 @@
 #
 # What it does:
 #   1. Creates .env from .env.example (if not present)
-#   2. Writes ~/.obsidian-wiki/config so skills work from any project
+#   2. Writes ~/.obsidian-wiki/config[.<profile>] so skills work from any project
 #   3. Symlinks .skills/* into each agent's expected skills directory:
 #      Project-local:
 #        - .claude/skills/        (Claude Code)
@@ -15,7 +15,7 @@
 #        - .agents/skills/        (AGENTS.md-aware agents, generic)
 #        - .kiro/skills/          (Kiro IDE/CLI)
 #      Global:
-#        - ~/.claude/skills/      (Claude Code, portable skills only)
+#        - <CLAUDE_HISTORY_PATH>/skills/    (Claude Code, portable skills only)
 #        - ~/.gemini/skills/      (Gemini CLI)
 #        - ~/.codex/skills/       (Codex)
 #        - ~/.hermes/skills/      (Hermes)
@@ -71,7 +71,6 @@ fi
 
 # ── Step 1b: ~/.obsidian-wiki/config ─────────────────────────
 GLOBAL_CONFIG_DIR="$HOME/.obsidian-wiki"
-GLOBAL_CONFIG="$GLOBAL_CONFIG_DIR/config"
 mkdir -p "$GLOBAL_CONFIG_DIR"
 
 # Read vault path from .env if it's already set
@@ -94,12 +93,35 @@ if [ -z "$VAULT_PATH" ] || [ "$VAULT_PATH" = "/path/to/your/vault" ]; then
   fi
 fi
 
-# Write global config with quoted path (preserves spaces)
+# Read CLAUDE_HISTORY_PATH from .env; default to ~/.claude.
+# Everything else (history path, profile name) is derived from this single value.
+CLAUDE_HISTORY_PATH=""
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  CLAUDE_HISTORY_PATH=$(grep -E '^CLAUDE_HISTORY_PATH=' "$SCRIPT_DIR/.env" | cut -d'=' -f2- | sed 's/^"//;s/"$//')
+  CLAUDE_HISTORY_PATH="${CLAUDE_HISTORY_PATH/#\~/$HOME}"   # expand ~ if stored literally
+fi
+CLAUDE_HISTORY_PATH="${CLAUDE_HISTORY_PATH:-$HOME/.claude}"
+
+# Profile name from .env — if set, writes ~/.obsidian-wiki/config.<profile>;
+# if empty, writes ~/.obsidian-wiki/config.
+CLAUDE_PROFILE=""
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  CLAUDE_PROFILE=$(grep -E '^CLAUDE_PROFILE=' "$SCRIPT_DIR/.env" | cut -d'=' -f2- | sed 's/^"//;s/"$//')
+fi
+
+if [ -n "$CLAUDE_PROFILE" ]; then
+  GLOBAL_CONFIG="$GLOBAL_CONFIG_DIR/config.$CLAUDE_PROFILE"
+  echo "✅  Profile config written to ~/.obsidian-wiki/config.$CLAUDE_PROFILE"
+else
+  GLOBAL_CONFIG="$GLOBAL_CONFIG_DIR/config"
+  echo "✅  Global config written to ~/.obsidian-wiki/config"
+fi
+
 cat > "$GLOBAL_CONFIG" <<EOF
 OBSIDIAN_VAULT_PATH="$VAULT_PATH"
 OBSIDIAN_WIKI_REPO="$SCRIPT_DIR"
+CLAUDE_HISTORY_PATH="$CLAUDE_HISTORY_PATH"
 EOF
-echo "✅  Global config written to ~/.obsidian-wiki/config"
 
 # ── Step 1c: Bootstrap symlinks ──────────────────────────────
 # .hermes.md → AGENTS.md  (Hermes resolves .hermes.md before AGENTS.md;
@@ -130,8 +152,9 @@ for agent_dir in "${AGENT_DIRS[@]}"; do
 done
 
 # ── Step 3: Install global skills ────────────────────────────
-# ~/.claude/skills gets only the two portable skills (usable from any project)
-GLOBAL_SKILL_DIR="$HOME/.claude/skills"
+# The Claude instance for this wiki gets wiki-update and wiki-query (portable,
+# usable from any project). Determined by CLAUDE_HISTORY_PATH in .env.
+GLOBAL_SKILL_DIR="$CLAUDE_HISTORY_PATH/skills"
 mkdir -p "$GLOBAL_SKILL_DIR"
 for skill_name in "wiki-update" "wiki-query"; do
   link_path="$GLOBAL_SKILL_DIR/$skill_name"
@@ -143,7 +166,7 @@ for skill_name in "wiki-update" "wiki-query"; do
   fi
   ln -s "$SKILLS_DIR/$skill_name" "$link_path"
 done
-echo "✅  Installed global skills → ~/.claude/skills/ (wiki-update, wiki-query)"
+echo "✅  Installed global skills → $CLAUDE_HISTORY_PATH/skills/ (wiki-update, wiki-query)"
 
 # Steps 3b–3j: Install all skills for every supported agent.
 # OpenClaw discovers skills from ~/.agents/skills/ (per docs.openclaw.ai/skills);

@@ -37,10 +37,10 @@ Process everything regardless of manifest. Use after a `wiki-rebuild` or if the 
 
 ## Claude Code Data Layout
 
-Claude Code stores everything under `~/.claude/`. Here is the actual structure:
+Claude Code stores everything under `$CLAUDE_HISTORY_PATH/`. Here is the actual structure:
 
 ```
-~/.claude/
+$CLAUDE_HISTORY_PATH/
 ├── projects/                          # Per-project directories
 │   ├── -Users-name-project-a/         # Path-derived name (slashes → dashes)
 │   │   ├── <session-uuid>.jsonl       # Conversation data (JSONL)
@@ -67,17 +67,17 @@ Claude Code stores everything under `~/.claude/`. Here is the actual structure:
 
 ## Step 1: Survey and Compute Delta
 
-Scan `CLAUDE_HISTORY_PATH` and compare against `.manifest.json`:
+Scan `$CLAUDE_HISTORY_PATH` and compare against `.manifest.json`:
 
 ```
 # Find all projects
-Glob: ~/.claude/projects/*/
+Glob: $CLAUDE_HISTORY_PATH/projects/*/
 
 # Find memory files (highest value)
-Glob: ~/.claude/projects/*/memory/*.md
+Glob: $CLAUDE_HISTORY_PATH/projects/*/memory/*.md
 
 # Find conversation JSONL files
-Glob: ~/.claude/projects/*/*.jsonl
+Glob: $CLAUDE_HISTORY_PATH/projects/*/*.jsonl
 ```
 
 Build an inventory and classify each file:
@@ -167,7 +167,7 @@ Don't create one wiki page per conversation. Instead:
 
 ## Step 5: Distill into Wiki Pages
 
-Each Claude project maps to a project directory in the vault. The project directory name from `~/.claude/projects/` encodes the original path — decode it to get a clean project name:
+Each Claude project maps to a project directory in the vault. The project directory name from `$CLAUDE_HISTORY_PATH/projects/` encodes the original path — decode it to get a clean project name:
 
 ```
 -Users/Documents/projects/my-Project   → myproject
@@ -214,7 +214,7 @@ Also update the `projects` section of the manifest:
 ```json
 {
   "project-name": {
-    "source_path": "~/.claude/projects/-Users-...",
+    "source_path": "$CLAUDE_HISTORY_PATH/projects/-Users-...",
     "vault_path": "projects/project-name",
     "last_ingested": "TIMESTAMP",
     "conversations_ingested": 5,
