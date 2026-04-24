@@ -148,7 +148,7 @@ AGENT_DIRS=(
 )
 
 for agent_dir in "${AGENT_DIRS[@]}"; do
-  install_skills "$SCRIPT_DIR/$agent_dir" "$agent_dir/"
+  install_skills "$SCRIPT_DIR/$agent_dir" "$SCRIPT_DIR/$agent_dir/"
 done
 
 # ── Step 3: Install global skills ────────────────────────────
