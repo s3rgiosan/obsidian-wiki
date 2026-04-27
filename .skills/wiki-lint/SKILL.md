@@ -165,6 +165,24 @@ Find pages in `misc/` that have accumulated enough project affinity to be promot
 - Run the `cross-linker` skill first if affinity scores look stale (e.g., `affinity: {}` on a page with many wikilinks)
 - To promote: move the page to `projects/<project-name>/references/` (or another appropriate category), update its `category` frontmatter, remove `promotion_status`, and grep the vault for backlinks to update them
 
+### 11. Synthesis Gaps
+
+Identify high-value synthesis opportunities the wiki is missing — concept pairs that co-occur across many pages but have no `synthesis/` page connecting them.
+
+**How to check:**
+- List all pages in `synthesis/` — collect the concept pairs each one already covers (from its `[[wikilinks]]` or title)
+- Pick 10-15 frequently linked concepts from `concepts/` and `entities/`
+- For each pair, run a quick grep to count pages that link to both:
+  ```bash
+  grep -rl "\[\[ConceptA\]\]" "$OBSIDIAN_VAULT_PATH" --include="*.md" > /tmp/a.txt
+  grep -rl "\[\[ConceptB\]\]" "$OBSIDIAN_VAULT_PATH" --include="*.md" > /tmp/b.txt
+  comm -12 <(sort /tmp/a.txt) <(sort /tmp/b.txt) | wc -l
+  ```
+- Flag pairs with co-occurrence ≥ 3 that have no existing synthesis page
+
+**How to fix:**
+- Run `/wiki-synthesize` to automatically discover and fill the top gaps
+
 ## Output Format
 
 Report findings as a structured list:
@@ -215,13 +233,21 @@ Pages in misc/ that have ≥ 3 connections to a single project and are ready to 
 | Page | Top Project | Affinity Score |
 |---|---|---|
 | `misc/web-martinfowler-articles-microservices.md` | `obsidian-wiki` | 4 |
+
+### Synthesis Gaps (N found)
+Concept pairs that co-occur frequently but have no synthesis page:
+
+| Pair | Co-occurrence | Suggested Action |
+|---|---|---|
+| [[Caching]] × [[Consistency]] | 5 pages | Run `/wiki-synthesize` |
+| [[Testing]] × [[Observability]] | 3 pages | Run `/wiki-synthesize` |
 ```
 
 ## After Linting
 
 Append to `log.md`:
 ```
-- [TIMESTAMP] LINT issues_found=N orphans=X broken_links=Y stale=Z contradictions=W prov_issues=P missing_summary=S fragmented_clusters=F visibility_issues=V promotion_candidates=C
+- [TIMESTAMP] LINT issues_found=N orphans=X broken_links=Y stale=Z contradictions=W prov_issues=P missing_summary=S fragmented_clusters=F visibility_issues=V promotion_candidates=C synthesis_gaps=G
 ```
 
 Offer to fix issues automatically or let the user decide which to address.

@@ -21,9 +21,11 @@ All config files store `OBSIDIAN_VAULT_PATH`, `OBSIDIAN_WIKI_REPO`, and `CLAUDE_
 $OBSIDIAN_VAULT_PATH/
 ├── index.md                # Master index — every page listed, always kept current
 ├── log.md                  # Chronological activity log (ingests, updates, lints)
+├── hot.md                  # Session hot cache — ~500-word semantic snapshot of recent activity
 ├── .manifest.json          # Tracks every ingested source: path, timestamps, pages produced
 ├── _meta/
-│   └── taxonomy.md         # Controlled tag vocabulary
+│   ├── taxonomy.md         # Controlled tag vocabulary
+│   └── *.base              # Obsidian Bases dashboard definitions (wiki-dashboard skill)
 ├── _insights.md            # Graph analysis output (hubs, bridges, dead ends)
 ├── _raw/                   # Staging area — drop rough notes here, next ingest promotes them
 ├── concepts/               # Abstract ideas, patterns, mental models
@@ -62,6 +64,10 @@ Skills live in `.skills/<name>/SKILL.md`. Match the user's intent to the right s
 | "fix my tags" / "normalize tags" / "tag audit" | `tag-taxonomy` |
 | "update wiki" / "sync to wiki" / "save this to my wiki" | `wiki-update` |
 | "export wiki" / "export graph" / "graphml" / "neo4j" | `wiki-export` |
+| "color my graph" / "color code obsidian" / "color by tag/category/visibility" | `graph-colorize` |
+| "save this" / "/wiki-capture" / "capture this" / "file this conversation" | `wiki-capture` |
+| "/wiki-research [topic]" / "research X" / "find everything about Y" | `wiki-research` |
+| "create a dashboard" / "vault dashboard" / "show all X as a table" / "dynamic view" | `wiki-dashboard` |
 | "create a new skill" | `skill-creator` |
 
 ## Cross-Project Usage
@@ -105,10 +111,11 @@ See `wiki-query` and `wiki-export` skills for how the filter is applied.
 ## Core Principles
 
 - **Compile, don't retrieve.** The wiki is pre-compiled knowledge. Update existing pages — don't append or duplicate.
-- **Track everything.** Update `.manifest.json` after ingesting, `index.md` and `log.md` after any operation.
+- **Track everything.** Update `.manifest.json` after ingesting, `index.md`, `log.md`, and `hot.md` after any write operation.
 - **Connect with `[[wikilinks]]`.** Every page should link to related pages. This is what makes it a knowledge graph, not a folder of files.
 - **Frontmatter is required.** Every wiki page needs: `title`, `category`, `tags`, `sources`, `created`, `updated`.
 - **Single source of truth.** Visibility tags shape how content is surfaced — they don't duplicate or separate it.
+- **Keep context warm.** `hot.md` is a ~500-word semantic snapshot of recent activity. Every write skill updates it so the next session can pick up where the last one left off without crawling the full vault.
 
 ## Architecture Reference
 

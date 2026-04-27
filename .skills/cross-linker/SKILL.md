@@ -183,12 +183,14 @@ To promote: move the page to `projects/<project-name>/references/` and update al
 - `_archives/*` — archived content
 ```
 
-## Step 7: Update Log
+## Step 7: Update Log and Hot Cache
 
 Append to `log.md`:
 ```
 - [TIMESTAMP] CROSS_LINK pages_scanned=N links_added=M pages_modified=P orphans_remaining=Q misc_affinity_updated=R promotion_candidates=S
 ```
+
+**`hot.md`** — Read `$OBSIDIAN_VAULT_PATH/hot.md` (create from the template in `wiki-ingest` if missing). Update **Recent Activity** with a one-line summary of what was linked — e.g. "Cross-linked 23 mentions across 12 pages; 2 orphans remain." Keep the last 3 operations. Update `updated` timestamp.
 
 ## Tips
 

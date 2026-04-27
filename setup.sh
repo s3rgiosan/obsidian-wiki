@@ -48,6 +48,10 @@ install_skills() {
     elif [ -d "$link_path" ]; then
       echo "⚠️   $link_path is a real directory, skipping symlink"
       continue
+    elif [ -f "$link_path" ]; then
+      # Git on Windows without core.symlinks=true writes committed symlinks
+      # as regular files containing the target path. Replace with a real symlink.
+      rm "$link_path"
     fi
     ln -s "${skill%/}" "$link_path"
   done
@@ -163,6 +167,8 @@ for skill_name in "wiki-update" "wiki-query"; do
   elif [ -d "$link_path" ]; then
     echo "⚠️   $link_path is a real directory, skipping symlink"
     continue
+  elif [ -f "$link_path" ]; then
+    rm "$link_path"
   fi
   ln -s "$SKILLS_DIR/$skill_name" "$link_path"
 done
