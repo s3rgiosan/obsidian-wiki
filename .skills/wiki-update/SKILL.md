@@ -17,10 +17,12 @@ You are distilling knowledge from the current project into the user's Obsidian w
    - Check `$CLAUDE_CONFIG_DIR` env var (Claude Code sets this for non-default instances)
    - Scan `~/.obsidian-wiki/config*` files for the one whose `CLAUDE_HISTORY_PATH` matches `$CLAUDE_CONFIG_DIR`
    - Fall back to `~/.obsidian-wiki/config` if no match or env var unset
-   - Read `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_WIKI_REPO` from the resolved file
+   - Read `OBSIDIAN_VAULT_PATH`, `OBSIDIAN_WIKI_REPO`, and `OBSIDIAN_LINK_FORMAT` (`wikilink` default or `markdown`) from the resolved file
 2. If no config file exists, tell the user to set `CLAUDE_HISTORY_PATH` in `.env` and run `bash setup.sh`.
 3. Read `$OBSIDIAN_VAULT_PATH/.manifest.json` to check if this project has been synced before.
 4. Read `$OBSIDIAN_VAULT_PATH/index.md` to know what the wiki already contains.
+
+When writing internal links in Steps 4–5, apply the link format from `llm-wiki/SKILL.md` (Link Format section) using the `OBSIDIAN_LINK_FORMAT` value.
 
 ## Step 1: Understand the Project
 
@@ -113,6 +115,9 @@ provenance:
   extracted: 0.6
   inferred: 0.35
   ambiguous: 0.05
+base_confidence: 0.59
+lifecycle: draft
+lifecycle_changed: TIMESTAMP_DATE
 created: TIMESTAMP
 updated: TIMESTAMP
 ---

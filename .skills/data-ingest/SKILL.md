@@ -15,9 +15,11 @@ You are ingesting arbitrary text data into an Obsidian wiki. The source could be
 
 ## Before You Start
 
-1. Read `.env` to get `OBSIDIAN_VAULT_PATH`
+1. Read `~/.obsidian-wiki/config` (preferred) or `.env` (fallback) to get `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_LINK_FORMAT` (default: `wikilink`)
 2. Read `.manifest.json` at the vault root — check if this source has been ingested before
 3. Read `index.md` at the vault root to know what already exists
+
+When writing internal links, apply the link format from `llm-wiki/SKILL.md` (Link Format section) using the `OBSIDIAN_LINK_FORMAT` value.
 
 If the source path is already in `.manifest.json` and the file hasn't been modified since `ingested_at`, tell the user it's already been ingested. Ask if they want to re-ingest anyway.
 
@@ -119,6 +121,13 @@ Follow the `wiki-ingest` skill's process for creating/updating pages:
 - Attribute claims to their source
 - **Write a `summary:` frontmatter field** on every new page (1–2 sentences, ≤200 characters) answering "what is this page about?" — this is what downstream skills read to avoid opening the page body.
 - **Apply provenance markers** per the convention in `llm-wiki`. Conversation, log, and chat data tend to be high-inference — you're often reading between the turns to extract a coherent claim. Be liberal with `^[inferred]` for synthesized patterns and with `^[ambiguous]` when speakers contradict each other or you're unsure who's right. Write a `provenance:` frontmatter block on each new/updated page.
+- **Add confidence and lifecycle fields** to every new page:
+  ```yaml
+  base_confidence: 0.37
+  lifecycle: draft
+  lifecycle_changed: <ISO date today>
+  ```
+  The caller may pass an explicit quality override (e.g. `quality: documentation`) — if so, recompute: `base_confidence = round(0.17 + 0.5 × quality_score, 2)` using the quality table in `llm-wiki/SKILL.md`. Default is `unknown` (0.4) → 0.37.
 
 ## Step 5: Update Manifest and Special Files
 

@@ -16,7 +16,7 @@ This skill can be invoked directly or via the `wiki-history-ingest` router (`/wi
 
 ## Before You Start
 
-1. Read `.env` to get `OBSIDIAN_VAULT_PATH` and `OPENCLAW_HISTORY_PATH` (default to `~/.openclaw` if unset)
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `OPENCLAW_HISTORY_PATH` (defaults to `~/.openclaw`)
 2. Read `.manifest.json` at the vault root to check what has already been ingested
 3. Read `index.md` at the vault root to understand what the wiki already contains
 
@@ -157,6 +157,13 @@ For each impacted project, create/update `projects/<name>/<name>.md`.
 - Distill knowledge, not chronology
 - Avoid "on date X we discussed..." unless date context is essential
 - Add `summary:` frontmatter on each new/updated page (1–2 sentences, ≤ 200 chars)
+- Add confidence and lifecycle fields to every new page:
+  ```yaml
+  base_confidence: 0.42
+  lifecycle: draft
+  lifecycle_changed: <ISO date today>
+  ```
+  Leave `lifecycle` unchanged on update.
 - Add provenance markers:
   - `^[extracted]` when directly grounded in explicit session/memory content
   - `^[inferred]` when synthesizing patterns across multiple sessions

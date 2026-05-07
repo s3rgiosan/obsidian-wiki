@@ -15,6 +15,8 @@ All config files store `OBSIDIAN_VAULT_PATH`, `OBSIDIAN_WIKI_REPO`, and `CLAUDE_
 
 **Writing config files:** `setup.sh` reads `CLAUDE_HISTORY_PATH` and `CLAUDE_PROFILE` from `.env`. If `CLAUDE_PROFILE` is set it writes `~/.obsidian-wiki/config.<profile>`; otherwise `~/.obsidian-wiki/config`. The config file stores `CLAUDE_HISTORY_PATH` so skills can match it at runtime.
 
+**After reading config, always read `$OBSIDIAN_VAULT_PATH/AGENTS.md` if it exists.** It contains owner-specific conventions (domain vocabulary, ingest preferences, writing style, project scoping) that override framework defaults for all skills. Apply it for the duration of the session.
+
 ## Vault Structure
 
 ```
@@ -38,7 +40,7 @@ $OBSIDIAN_VAULT_PATH/
     └── <project-name>.md   # One page per project synced via wiki-update
 ```
 
-Every wiki page has required frontmatter: `title`, `category`, `tags`, `sources`, `created`, `updated`. Pages connect via `[[wikilinks]]`.
+Every wiki page has required frontmatter: `title`, `category`, `tags`, `sources`, `created`, `updated`. Pages connect via internal links — `[[wikilinks]]` by default, or standard Markdown links when `OBSIDIAN_LINK_FORMAT=markdown` is set in config.
 
 ## Skill Routing
 
@@ -68,7 +70,12 @@ Skills live in `.skills/<name>/SKILL.md`. Match the user's intent to the right s
 | "save this" / "/wiki-capture" / "capture this" / "file this conversation" | `wiki-capture` |
 | "/wiki-research [topic]" / "research X" / "find everything about Y" | `wiki-research` |
 | "create a dashboard" / "vault dashboard" / "show all X as a table" / "dynamic view" | `wiki-dashboard` |
+| "synthesize my wiki" / "find connections" / "what concepts keep coming up together" / "/wiki-synthesize" | `wiki-synthesize` |
 | "create a new skill" | `skill-creator` |
+| "/wiki-claude [topic]" / "/wiki-codex [topic]" / "/wiki-hermes [topic]" / "/wiki-openclaw [topic]" / "/wiki-copilot [topic]" | `wiki-agent` |
+| "/memory-bridge" / "browse codex memory" / "what did codex know about X" / "compare tool memories" / "cross-tool memory" | `memory-bridge` |
+| "/daily-update" / "morning sync" / "refresh the wiki index" / "set up the daily cron" / "install terminal notification" | `daily-update` |
+| "/impl-validator" / "check this implementation" / "validate what you did" / "is this correct?" | `impl-validator` |
 
 ## Cross-Project Usage
 

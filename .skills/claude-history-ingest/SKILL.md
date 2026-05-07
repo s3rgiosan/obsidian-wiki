@@ -16,7 +16,7 @@ This skill can be invoked directly or via the `wiki-history-ingest` router (`/wi
 
 ## Before You Start
 
-1. Read `.env` to get `OBSIDIAN_VAULT_PATH` and `CLAUDE_HISTORY_PATH` (defaults to `~/.claude`)
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `CLAUDE_HISTORY_PATH` (defaults to `~/.claude`)
 2. Read `.manifest.json` at the vault root to check what's already been ingested
 3. Read `index.md` at the vault root to know what the wiki already contains
 
@@ -275,6 +275,14 @@ For each project with content, create or update the project overview page at `pr
 **Important:** Distill the _knowledge_, not the conversation. Don't write "In a conversation on March 15, the user asked about X." Write the knowledge itself, with the conversation as a source attribution.
 
 **Write a `summary:` frontmatter field** on every new/updated page — 1–2 sentences, ≤200 chars, answering "what is this page about?" for a reader who hasn't opened it. `wiki-query`'s cheap retrieval path reads this field to avoid opening page bodies.
+
+**Add confidence and lifecycle fields** to every new page's frontmatter:
+```yaml
+base_confidence: 0.42
+lifecycle: draft
+lifecycle_changed: <ISO date today>
+```
+On update, leave `lifecycle` and `lifecycle_changed` unchanged — only a human editor transitions lifecycle state.
 
 **Mark provenance** per the convention in `llm-wiki` (Provenance Markers section):
 
