@@ -66,7 +66,7 @@ except:
 " 2>/dev/null || echo "")
 
   if [[ -n "$last_updated" ]]; then
-    stale_count=$(MANIFEST="$MANIFEST" python3 - <<'PYEOF'
+    stale_count=$(MANIFEST="$MANIFEST" OBSIDIAN_VAULT_PATH="$OBSIDIAN_VAULT_PATH" python3 - <<'PYEOF'
 import json, os, sys
 from datetime import datetime, timezone
 
@@ -85,9 +85,12 @@ except Exception:
     print(0)
     sys.exit()
 
+vault_path = os.environ.get("OBSIDIAN_VAULT_PATH", "")
 stale = 0
 for path, meta in manifest.get("sources", {}).items():
     expanded = os.path.expanduser(path)
+    if not os.path.isabs(expanded) and vault_path:
+        expanded = os.path.join(vault_path, expanded)
     if os.path.exists(expanded):
         mtime = datetime.fromtimestamp(os.path.getmtime(expanded), tz=timezone.utc)
         if mtime > last_updated:
