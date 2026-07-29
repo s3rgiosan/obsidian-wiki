@@ -110,11 +110,37 @@ def install_skills(
     return installed
 
 
+def claude_home() -> Path:
+    """Resolve the Claude Code config dir for the instance being set up.
+
+    Claude Code sets ``$CLAUDE_CONFIG_DIR`` for non-default instances; the
+    global config records the same path as ``CLAUDE_HISTORY_PATH`` so later
+    runs (and the skills' Config Resolution Protocol) target the same instance.
+    Defaults to ``~/.claude``.
+    """
+    env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if env_dir:
+        return Path(env_dir).expanduser()
+    configured = _read_config_value("CLAUDE_HISTORY_PATH")
+    if configured:
+        return Path(configured).expanduser()
+    return HOME / ".claude"
+
+
+def _display_path(path: Path) -> str:
+    """Render *path* with ``~`` for $HOME, for user-facing labels."""
+    try:
+        return f"~/{path.relative_to(HOME)}"
+    except ValueError:
+        return str(path)
+
+
 # Agents whose skills directory lives under $HOME. (path-under-home, label,
 # subset). All get every skill — pip users have no cloned repo to host
 # project-scoped skills, so everything must be globally discoverable.
+# Claude Code is not listed here: its directory is instance-dependent and
+# resolved at call time by claude_home() — see global_agent_dirs().
 GLOBAL_AGENT_DIRS: list[tuple[str, str, tuple[str, ...] | None]] = [
-    (".claude/skills", "~/.claude/skills/ (Claude Code)", None),
     (".gemini/skills", "~/.gemini/skills/ (Gemini CLI)", None),
     (".gemini/antigravity/skills", "~/.gemini/antigravity/skills/ (Antigravity, legacy)", None),
     (".codex/skills", "~/.codex/skills/ (Codex)", None),
@@ -129,9 +155,23 @@ GLOBAL_AGENT_DIRS: list[tuple[str, str, tuple[str, ...] | None]] = [
 ]
 
 
+def global_agent_dirs() -> list[tuple[Path, str, tuple[str, ...] | None]]:
+    """Resolve every global agent skills dir, Claude Code first.
+
+    Claude Code's entry follows ``$CLAUDE_CONFIG_DIR`` / ``CLAUDE_HISTORY_PATH``
+    so multiple Claude instances each get their own skill install.
+    """
+    claude_skills = claude_home() / "skills"
+    dirs: list[tuple[Path, str, tuple[str, ...] | None]] = [
+        (claude_skills, f"{_display_path(claude_skills)}/ (Claude Code)", None)
+    ]
+    dirs.extend((HOME / rel, label, subset) for rel, label, subset in GLOBAL_AGENT_DIRS)
+    return dirs
+
+
 def install_global_skills(mode: str) -> None:
-    for rel, label, subset in GLOBAL_AGENT_DIRS:
-        install_skills(HOME / rel, label, subset=subset, mode=mode)
+    for target, label, subset in global_agent_dirs():
+        install_skills(target, label, subset=subset, mode=mode)
     _install_hermes_profiles(mode)
 
 
@@ -283,9 +323,13 @@ def write_config(vault_path: str) -> None:
     # OBSIDIAN_WIKI_REPO points at the bundled data root so skills that reference
     # framework assets (templates, references) can find them post-install.
     repo_root = skills_dir().parent
+    # CLAUDE_HISTORY_PATH pins this config to the Claude instance that ran setup,
+    # so the skills' Config Resolution Protocol can match it back at runtime.
+    history_path = claude_home()
     GLOBAL_CONFIG.write_text(
         f'OBSIDIAN_VAULT_PATH="{vault_path}"\n'
         f'OBSIDIAN_WIKI_REPO="{repo_root}"\n'
+        f'CLAUDE_HISTORY_PATH="{history_path}"\n'
         f'OBSIDIAN_WIKI_VERSION="{__version__}"\n'
     )
     print(f"✅  Global config written to {GLOBAL_CONFIG}")
@@ -310,15 +354,16 @@ def _check_stale() -> None:
         )
         return
 
-    # Even if the version matches, check that ~/.claude/skills has the full set.
-    claude_skills_dir = HOME / ".claude" / "skills"
+    # Even if the version matches, check that this instance's Claude skills dir
+    # has the full set.
+    claude_skills_dir = claude_home() / "skills"
     if claude_skills_dir.is_dir():
         bundled = set(list_skills())
         installed = {p.name for p in claude_skills_dir.iterdir() if p.is_dir()}
         missing = bundled - installed
         if missing:
             print(
-                f"⚠️  {len(missing)} skill(s) missing from ~/.claude/skills/ "
+                f"⚠️  {len(missing)} skill(s) missing from {_display_path(claude_skills_dir)}/ "
                 f"(e.g. {', '.join(sorted(missing)[:3])}{', ...' if len(missing) > 3 else ''}).\n"
                 f"   Run: obsidian-wiki setup",
                 file=sys.stderr,
@@ -504,8 +549,7 @@ def run_doctor(*, vault_override: str | None = None, project_dir: str | None = N
     partial_agents: list[str] = []
     full_agents = 0
     bundled_set = set(bundled)
-    for rel, label, _subset in GLOBAL_AGENT_DIRS:
-        agent_dir = HOME / rel
+    for agent_dir, label, _subset in global_agent_dirs():
         if not agent_dir.is_dir():
             continue
         installed = {p.name for p in agent_dir.iterdir() if (p.is_dir() or p.is_symlink())}
@@ -1054,8 +1098,7 @@ def cmd_info(args: argparse.Namespace) -> int:
     print()
     print("Agent skill install status:")
     bundled_set = set(bundled)
-    for rel, label, _subset in GLOBAL_AGENT_DIRS:
-        agent_dir = HOME / rel
+    for agent_dir, label, _subset in global_agent_dirs():
         if not agent_dir.is_dir():
             print(f"  {label}: not installed")
             continue
