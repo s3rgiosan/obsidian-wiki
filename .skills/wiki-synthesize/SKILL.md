@@ -14,7 +14,7 @@ You are scanning the wiki for concepts that co-occur across many pages but have 
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_LINK_FORMAT` (default: `wikilink`).
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_LINK_FORMAT` (default: `wikilink`).
 2. Read `index.md` to get the full page inventory.
 3. Read `hot.md` if it exists — it surfaces recent activity and active threads that may already point to synthesis opportunities.
 4. Read `_meta/taxonomy.md` to understand the tag vocabulary.
@@ -35,7 +35,7 @@ Build a co-occurrence matrix: for every pair of concept/entity pages (A, B), cou
 You don't need to be exhaustive — aim for the top 20-30 pairs by co-occurrence score. Use Grep to find backlinks efficiently:
 
 ```bash
-grep -rl "\[\[ConceptA\]\]" "$OBSIDIAN_VAULT_PATH" --include="*.md"
+rg -l --glob '*.md' "\[\[ConceptA\]\]" "$OBSIDIAN_VAULT_PATH"
 ```
 
 Run this for your top candidate concepts and intersect the result sets.
@@ -104,6 +104,10 @@ lifecycle_changed: TIMESTAMP_DATE
 
 *Where the two concepts pull in opposite directions. Unresolved contradictions. Cases where applying one undermines the other.*
 
+## Strongest Objection
+
+*The best skeptical reading of THIS page's cross-cutting insight — the case a sharp critic would make that the connection is spurious, overstated, or an artifact of how the sources were written. Follow it with a testable search query (e.g. `> test: does X actually hold when Y is controlled for?`), never an invented citation. A synthesis that can't name its own strongest objection hasn't earned its conclusion.*
+
 ## Open Questions
 
 *What this synthesis surfaces that the wiki doesn't yet have an answer for. Good candidates for future research.*
@@ -158,6 +162,7 @@ Skipped (consider next time):
 - [ ] Every synthesis page links back to its source concepts
 - [ ] Source concept pages link forward to the synthesis page
 - [ ] No synthesis page just restates what's already on the source pages — it must add a cross-cutting insight
+- [ ] Every synthesis page names its Strongest Objection with a testable search query (not an invented source)
 - [ ] `index.md` and `log.md` updated
 - [ ] `hot.md` updated
 
@@ -167,3 +172,38 @@ Skipped (consider next time):
 - **Don't synthesize for synthesis's sake.** If two concepts just happen to appear together a lot without a real conceptual link, skip them.
 - **Three-way syntheses are powerful but rare.** Only create them when three concepts form a genuine triangle of mutual influence — not just because all three appear in the same project page.
 - **Check `_insights.md` first.** The wiki-status skill may have already flagged synthesis candidates there — start with those before running the co-occurrence scan from scratch.
+
+## QMD Refresh After Vault Writes
+
+QMD is a search index, not the source of truth. If `$QMD_WIKI_COLLECTION` is empty or unset, skip this step. Run it only after this skill has written or rewritten vault markdown. If QMD refresh fails, do not roll back the vault changes; report the QMD status separately.
+
+Use `$QMD_CLI` if set; otherwise use `qmd`.
+
+```bash
+${QMD_CLI:-qmd} update
+```
+
+If the output says vectors are needed or embeddings may be stale, run:
+
+```bash
+${QMD_CLI:-qmd} embed
+```
+
+Verify the collection with either:
+
+```bash
+${QMD_CLI:-qmd} ls "$QMD_WIKI_COLLECTION"
+```
+
+or, when a specific page path is known:
+
+```bash
+${QMD_CLI:-qmd} get "qmd://$QMD_WIKI_COLLECTION/<page>.md" -l 5
+```
+
+Record one of:
+- `QMD refreshed: update + embed + verified`
+- `QMD refreshed: update only + verified`
+- `QMD skipped: QMD_WIKI_COLLECTION unset`
+- `QMD skipped: qmd CLI unavailable`
+- `QMD failed: <short error summary>`

@@ -9,7 +9,7 @@ This project is a **skill-based framework** for building and maintaining an Obsi
 
 ## Quick Orientation
 
-1. Read `.env` for `OBSIDIAN_VAULT_PATH` — this is where the wiki lives.
+1. Resolve config via `AGENTS.md`: honor an inline `@name` vault override first, then `.env`, then `~/.obsidian-wiki/config`. This gives `OBSIDIAN_VAULT_PATH` — where the wiki lives.
 2. Read `.manifest.json` at the vault root to see what's already been ingested.
 3. Skills are in `.skills/` (also at `.windsurf/skills/`). Each subfolder has a `SKILL.md`.
 
@@ -18,13 +18,14 @@ This project is a **skill-based framework** for building and maintaining an Obsi
 | User says something like… | Read this skill |
 |---|---|
 | "set up my wiki" / "initialize" | `.skills/wiki-setup/SKILL.md` |
-| "ingest" / "add this to the wiki" | `.skills/wiki-ingest/SKILL.md` |
-| "/wiki-history-ingest claude" / "/wiki-history-ingest codex" | `.skills/wiki-history-ingest/SKILL.md` |
+| "ingest" / "add this to the wiki" / "process this export" / "ingest this data" | `.skills/wiki-ingest/SKILL.md` |
+| "/wiki-history-ingest claude" / "/wiki-history-ingest codex" / "/wiki-history-ingest pi" | `.skills/wiki-history-ingest/SKILL.md` |
 | "import my Claude history" | `.skills/claude-history-ingest/SKILL.md` |
 | "import my Codex history" | `.skills/codex-history-ingest/SKILL.md` |
-| "process this export" / "ingest this data" | `.skills/data-ingest/SKILL.md` |
+| "import my Pi history" | `.skills/pi-history-ingest/SKILL.md` |
 | "what's the status" / "show the delta" | `.skills/wiki-status/SKILL.md` |
 | "what do I know about X" / any question | `.skills/wiki-query/SKILL.md` |
+| "use my vault as context" / "context pack for X" / "bounded context" | `.skills/wiki-context-pack/SKILL.md` |
 | "audit" / "lint" / "find broken links" | `.skills/wiki-lint/SKILL.md` |
 | "rebuild" / "start over" / "archive" | `.skills/wiki-rebuild/SKILL.md` |
 | "link my pages" / "cross-reference" | `.skills/cross-linker/SKILL.md` |

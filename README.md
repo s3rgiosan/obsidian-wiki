@@ -1,26 +1,90 @@
 # obsidian-wiki
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Ar9av/obsidian-wiki)
 
 <p align="center">
-  <img width="460" height="307" alt="obsidian-wiki" src="https://github.com/user-attachments/assets/37f5586f-67f8-4078-9dbc-28e277287cf2" />
+  <a href="https://deepwiki.com/Ar9av/obsidian-wiki"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" /></a>
+  <a href="https://github.com/ar9av/obsidian-wiki/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></a>
+  <a href="https://x.com/_ar9av"><img src="https://img.shields.io/badge/@__ar9av-black?logo=x&logoColor=white" alt="X" /></a>
 </p>
 
-A knowledge mgmt system inspired by [gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) published by Andrej Karpathy about maintaining a personal knowledge base with LLMs : the "LLM Wiki" pattern.
+<p align="center">
+  <img width="768" height="512" alt="obisidan-wiki" src="https://github.com/user-attachments/assets/b44cf63b-3197-4fb1-8e18-dbc9a39f27a7" />
+</p>
 
-Instead of asking an LLM the same questions over over (or doing RAG every time), you compile knowledge once into interconnected markdown files and keep them current. In this case Obsidian is the viewer and the LLM is the maintainer.
+English | [繁體中文](README_TW.md)
 
-We took that and built a framework around it. The whole thing is a set of markdown skill files that any AI coding agent (Claude Code, Cursor, Windsurf, whatever you use) can read and execute. You point it at your Obsidian vault and tell it what to do.
+A **digital brain** you grow with your AI agent. It remembers what you figure out, connects it to what you already know, and answers when you ask.
+
+The pattern comes from Andrej Karpathy's [LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): compile knowledge once into interconnected markdown files and keep them current, instead of asking an LLM the same questions over and over (or running RAG every time). Obsidian is how you see the brain. Your AI agent is how you grow it.
+
+We built a framework around that idea. Every skill is a markdown file that any AI coding agent (Claude Code, Cursor, Windsurf, Pi, and others) reads and runs. Point it at an Obsidian vault, tell it what to remember, and the vault becomes a second brain you own.
 
 ## Quick Start
 
-### Install via Skills CLI (recommended)
+### Let your agent set it up
+
+The fastest path — no commands required. Give your agent this repo and say:
+
+```
+https://github.com/Ar9av/obsidian-wiki — set up my wiki
+```
+
+The agent reads [`.skills/wiki-setup/SKILL.md`](.skills/wiki-setup/SKILL.md) from the repo, asks where you want your vault to live, and initializes the full structure: directories, index, log, Obsidian config, and an optional auto-capture hook. That's it — the skill is the setup guide.
+
+This works in any agent that can read files (Claude Code, Cursor, Windsurf, Codex, Gemini CLI, Kiro, and more). After setup, every wiki skill is available immediately.
+
+### Install via pip (recommended)
+
+```bash
+pip install obsidian-wiki
+obsidian-wiki setup --vault /path/to/your/digital/brain
+```
+
+`obsidian-wiki setup` writes the config to `~/.obsidian-wiki/config` and installs every wiki skill into all your AI agents (Claude Code, Cursor, Codex, Gemini, Hermes, Pi, and more). Skills are symlinked to the installed package, so `pip install -U obsidian-wiki` upgrades them everywhere — just re-run `obsidian-wiki setup` to pick up new skills. Then open a project in your agent and say **"set up my wiki"**.
+
+```bash
+obsidian-wiki list              # list the bundled skills
+obsidian-wiki info              # show install paths, version, and config
+obsidian-wiki doctor            # health-check config, vault shape, and installed skills
+obsidian-wiki query "rate limiting"  # query the configured vault from the terminal
+obsidian-wiki lint              # lint the configured vault for broken links / metadata gaps
+obsidian-wiki trust-check --strict  # CI/scheduled gate for approved manual review fingerprints
+obsidian-wiki trust-record --all --reviewed-at <ISO-with-timezone> --approved  # record a human-approved full review
+obsidian-wiki setup --project . # also drop project-local skills + AGENTS.md into the current repo
+obsidian-wiki setup --copy      # copy skill files instead of symlinking
+```
+
+`OBSIDIAN_VAULT_PATH` is just any directory where you want your digital brain to live, a new empty folder or an existing Obsidian vault. Omit `--vault` to be prompted (or set it later in `~/.obsidian-wiki/config`).
+
+### Local CLI utilities
+
+The Python package also ships a few local commands for inspection and maintenance:
+
+```bash
+obsidian-wiki doctor --json
+obsidian-wiki query "what do I know about MCP security?"
+obsidian-wiki lint --strict
+obsidian-wiki graph-query /path/to/vault "transformer architecture"
+obsidian-wiki graph-analyse /path/to/vault --pretty
+```
+
+Use `doctor` to catch broken setup, stale installs, or malformed vault state. Use `query` and `lint` when you want fast local answers without going through an agent prompt. The lower-level `graph-query`, `graph-analyse`, `batch-plan`, `cache-*`, and `ast-extract` commands are still available for automation and debugging.
+
+### Multiple Vaults
+
+Keep a default vault active in `~/.obsidian-wiki/config`, or create named configs like `~/.obsidian-wiki/config.work` with `/wiki-switch new work`. From any directory, route one request to a named vault with `@name`, for example `@work update wiki` or `wiki-query @personal what do I know about MCP security`. The `@name` override applies only to that request and never changes your default vault.
+
+All supported agents can use this syntax after `obsidian-wiki setup` or `setup.sh`, because the shared skills and always-on bootstrap files all point back to the same Config Resolution Protocol. The routing token works with write skills (`@work update wiki`, `@research save this`) and read skills (`wiki-query @personal what do I know about X`).
+
+### Install via Skills CLI (deprecated)
 
 ```bash
 npx skills add Ar9av/obsidian-wiki
 ```
 
-This installs all wiki skills into your current agent (Claude Code, Cursor, Codex, etc.). Then open your agent and say **"set up my wiki"**.
+This only installs the markdown skills into the current agent. It does **not** write `~/.obsidian-wiki/config`, configure GitHub sync, or wire the global multi-agent bootstrap that `obsidian-wiki setup` / `setup.sh` performs.
+
+Use this path only if you intentionally want a partial, agent-local install and are prepared to manage config yourself. For a complete setup, use **Install via pip** or **Install via git clone** instead.
 
 Browse the full skill list at [skills.sh/ar9av/obsidian-wiki](https://skills.sh/ar9av/obsidian-wiki).
 
@@ -32,15 +96,13 @@ cd obsidian-wiki
 bash setup.sh
 ```
 
-`setup.sh` asks for your vault path, writes the config to `~/.obsidian-wiki/config`, symlinks skills into all your agents, and installs `wiki-update` globally so you can use it from any project.
-
-`OBSIDIAN_VAULT_PATH` is just any directory where you want your wiki documents to live. It can be a new empty folder or an existing Obsidian vault. Obsidian will read from it directly.
+`setup.sh` asks for your vault (path to your digital brain) path, writes the config to `~/.obsidian-wiki/config`, symlinks skills into all your agents, and installs `wiki-update` globally so you can use it from any project.
 
 Open the project in your agent and say **"set up my wiki"**. That's it.
 
 ## Agent Compatibility
 
-Works with **any AI coding agent** that can read files — Claude Code, Cursor, Windsurf, Codex, Gemini CLI, Kiro, and more. `setup.sh` handles skill discovery for each one automatically.
+Works with **any AI coding agent** that can read files — Claude Code, Cursor, Windsurf, Pi, Codex, Gemini CLI, Kiro, and more. `setup.sh` handles skill discovery for each one automatically.
 
 <details>
 <summary><b>Supported agents and manual setup instructions</b></summary>
@@ -63,8 +125,9 @@ Works with **any AI coding agent** that can read files — Claude Code, Cursor, 
 | **GitHub Copilot (VS Code)** | `.github/copilot-instructions.md` | — | Describe intent in chat |
 | **GitHub Copilot (CLI)** | — | `~/.copilot/skills/` | ✅ `/wiki-ingest`, `/wiki-query`, etc. |
 | **[Kilocode](https://kilo.ai/)** | `AGENTS.md` / `CLAUDE.md` | `.agents/skills/` + `.claude/skills/` | ✅ `/wiki-ingest`, `/wiki-status`, etc. |
+| **[Pi](https://pi.dev)** | `AGENTS.md` | `.pi/skills/` + `~/.pi/agent/skills/` | ✅ `/wiki-ingest`, `/wiki-history-ingest pi`, etc. |
 
-> Each agent has its own convention for discovering skills. `setup.sh` symlinks the canonical `.skills/` directory into each agent's expected location. You write skills once, every agent can use them.
+> Each agent has its own convention for discovering skills. `setup.sh` symlinks the canonical `.skills/` directory into each agent's expected location. You write skills once, every agent can use them. The same is true for named-vault routing: `@name` is documented in the shared skills and bootstrap context, so Claude Code, Cursor, Windsurf, Codex, Gemini, Kiro, Hermes, OpenClaw, Copilot CLI, Pi, and the generic `AGENTS.md` agents all pick it up from the same instructions.
 
 ### Manual setup (if you prefer `setup.sh`)
 
@@ -160,17 +223,29 @@ cd /path/to/obsidian-wiki && openclaw "set up my wiki"
 **CLI:** discovers skills from `~/.copilot/skills/`. Run `setup.sh` or manually symlink `.skills/*` there.
 </details>
 
+<details>
+<summary>Pi</summary>
+
+Reads `AGENTS.md` (walking up from cwd). Discovers skills from `.pi/skills/`, `.agents/skills/`, and `~/.pi/agent/skills/`. Run `setup.sh` or manually symlink `.skills/*` to `~/.pi/agent/skills/`.
+
+```bash
+cd /path/to/obsidian-wiki && pi "set up my wiki"
+# Mine Pi session history:
+/wiki-history-ingest pi
+```
+</details>
+
 </details>
 
 ## How it works
 
-Every ingest runs through four stages:
+Every time you feed the brain, it runs through four stages:
 
 **1. Ingest** — The agent reads your source material directly. It handles whatever you throw at it: markdown files, PDFs (with page ranges), JSONL conversation exports, plain text logs, chat exports, meeting transcripts, and images (screenshots, whiteboard photos, diagrams — vision-capable model required). No preprocessing step, no pipeline to run. The agent reads the file the same way it reads code.
 
-**2. Extract** — From the raw source, the agent pulls out concepts, entities, claims, relationships, and open questions. A conversation about debugging a React hook yields a "stale closure" pattern. A research paper yields the key idea and its caveats. A work log yields decisions and their rationale. Noise gets dropped, signal gets kept. Each page also gets a 1–2 sentence `summary:` in its frontmatter at write time — later queries use this to preview pages without opening them.
+**2. Pull Information** — From the raw source, the agent pulls out concepts, entities, claims, relationships, and open questions. A conversation about debugging a React hook yields a "stale closure" pattern. A research paper yields the key idea and its caveats. A work log yields decisions and their rationale. Noise gets dropped, signal gets kept. Each page also gets a 1–2 sentence `summary:` in its frontmatter at write time — later queries use this to preview pages without opening them.
 
-**3. Resolve** — New knowledge gets merged against what's already in the wiki. If a concept page exists, the agent updates it — merging new information, noting contradictions, strengthening cross-references. If it's genuinely new, a page gets created. Nothing is duplicated. Sources are tracked in frontmatter so every claim stays attributable.
+**3. Merge** — New knowledge gets merged against what's already in the wiki. If a concept page exists, the agent updates it — merging new information, noting contradictions, strengthening cross-references. If it's genuinely new, a page gets created. Nothing is duplicated. Sources are tracked in frontmatter so every claim stays attributable.
 
 **4. Schema** — The wiki schema isn't fixed upfront. It emerges from your sources and evolves as you add more. The agent maintains coherence: categories stay consistent, wikilinks point to real pages, the index reflects what's actually there. When you add a new domain (a new project, a new field of study), the schema expands to accommodate it without breaking what exists.
 
@@ -199,9 +274,9 @@ Modes: `by-tag` (default — top 10 tags), `by-category` (the seven vault folder
 
 - **Archive and rebuild.** When the wiki drifts too far from your sources, you can archive the whole thing (timestamped snapshot, nothing lost) and rebuild from scratch. Or restore any previous archive.
 
-- **Multi-agent ingest.** Documents, PDFs, Claude Code history (`~/.claude`), Codex sessions (`~/.codex/`), Hermes memories and sessions (`~/.hermes/`), OpenClaw MEMORY.md and sessions (`~/.openclaw/`), Windsurf data (`~/.windsurf`), ChatGPT exports, Slack logs, meeting transcripts, raw text. There are dedicated skills for Claude, Codex, Hermes, and OpenClaw history, plus a catch-all ingest skill for arbitrary text exports.
+- **Multi-agent ingest.** Documents, PDFs, Claude Code history (`~/.claude`), Codex sessions (`~/.codex/`), Hermes memories and sessions (`~/.hermes/`), OpenClaw MEMORY.md and sessions (`~/.openclaw/`), Pi sessions (`~/.pi/agent/sessions/`), Windsurf data (`~/.windsurf`), ChatGPT exports, Slack logs, meeting transcripts, raw text. There are dedicated skills for Claude, Codex, Hermes, OpenClaw, and Pi history, plus a catch-all ingest skill for arbitrary text exports.
 
-- **Cross-agent targeted search.** `/wiki-claude`, `/wiki-codex`, `/wiki-hermes`, `/wiki-openclaw`, `/wiki-copilot` — query-driven ingest from a specific agent's raw history. Say `/wiki-codex "rust ownership"` while in Claude Code and it finds your Codex sessions about that topic, extracts the relevant conversation blobs, distills them into wiki pages, and returns a synthesized answer you can use immediately. Different from bulk ingest: this is topic-first, not session-first. Each agent has its own extraction strategy (Codex rollout events, Claude JSONL turns, OpenClaw's pre-synthesized `MEMORY.md`, etc.). Pair with `/memory-bridge diff` to see what each tool uniquely contributed to a topic.
+- **Cross-agent targeted search.** `/wiki-claude`, `/wiki-codex`, `/wiki-hermes`, `/wiki-openclaw`, `/wiki-copilot`, `/wiki-pi` — query-driven ingest from a specific agent's raw history. Say `/wiki-codex "rust ownership"` while in Claude Code and it finds your Codex sessions about that topic, extracts the relevant conversation blobs, distills them into wiki pages, and returns a synthesized answer you can use immediately. Different from bulk ingest: this is topic-first, not session-first. Each agent has its own extraction strategy (Codex rollout events, Claude JSONL turns, OpenClaw's pre-synthesized `MEMORY.md`, Pi tree-structured JSONL sessions, etc.). Pair with `/memory-bridge diff` to see what each tool uniquely contributed to a topic.
 
 - **Audit and lint.** Find orphaned pages, broken wikilinks, stale content, contradictions, missing frontmatter. See a dashboard of what's been ingested vs what's pending.
 
@@ -256,7 +331,75 @@ Both skills degrade gracefully: if `QMD_WIKI_COLLECTION` / `QMD_PAPERS_COLLECTIO
 
 `_raw/` is a staging area inside your vault for unprocessed captures — rough notes, clipboard pastes, quick voice-memo transcripts. Drop files there and the next `wiki-ingest` run will promote them to proper wiki pages and remove the originals.
 
+The fastest way to feed `_raw/` during a live coding session is `/wiki-capture --quick` — it scans the current conversation, extracts bugs and gotchas, and writes structured draft files in under 60 seconds with no subagents or manifest writes.
+
 The directory is created automatically by `wiki-setup`. The path is configurable via `OBSIDIAN_RAW_DIR` in `.env` (defaults to `_raw`).
+
+### Browser Capture Extension
+
+This repo includes a zero-build Chrome extension at `extensions/brain-capture/` for saving web pages and selected text into your vault's `_raw/` folder.
+
+To install it:
+
+1. Open `chrome://extensions`
+2. Enable **Developer mode**
+3. Click **Load unpacked**
+4. Select `extensions/brain-capture`
+
+To find the configured `_raw` folder from this repo:
+
+```bash
+awk -F= '/^OBSIDIAN_VAULT_PATH=/{print $2 "/_raw"; exit}' "$(git rev-parse --show-toplevel)/.env"
+```
+
+After capturing pages into `_raw/`, ask your agent to process them:
+
+```text
+/wiki-ingest promote my raw pages
+```
+
+`wiki-ingest` will read each `_raw/` capture, distill it into the right wiki pages, update the manifest/index/log, and remove the promoted raw files so they are not processed twice.
+
+---
+
+## Syncing your vault to GitHub
+
+Your vault is a directory of plain markdown files — push it to a private GitHub repo and you get version history, backup, and cross-device sync for free. `obsidian-wiki setup` and `setup.sh` both ask you to configure this during the initial install — they share one implementation (`obsidian_wiki/sync.py`), so pip/uv and source/curl installs get the identical flow.
+
+**What setup does:**
+
+1. `git init` your vault if it isn't already a repo
+2. Creates a `.gitignore` that excludes Obsidian workspace/cache files
+3. Sets the GitHub remote you supply (the vault's `git remote` — not a config file — is the source of truth for whether sync is configured)
+4. Optionally adds a `wiki-sync` shell alias for `obsidian-wiki sync`
+5. Optionally installs an hourly cron job
+
+**Run a sync at any time:**
+
+```bash
+wiki-sync           # alias added by setup
+obsidian-wiki sync  # or call it directly
+```
+
+Each run stages all changes, commits as `sync 2026-06-08 14:00`, and pushes.
+
+**Manual setup (skip the prompt):**
+
+```bash
+obsidian-wiki sync-setup https://github.com/you/my-wiki.git
+# or do it by hand:
+cd /path/to/your/vault
+git init
+git remote add origin https://github.com/you/my-wiki.git
+```
+
+**Hourly auto-sync via cron (can be enabled during setup):**
+
+```
+0 * * * * obsidian-wiki sync --vault /path/to/your/vault >> ~/.obsidian-wiki/sync.log 2>&1
+```
+
+> Keep the repo **private** if your vault contains personal notes. Nothing is sent to any third-party service — your vault lives on your machines and your GitHub account only.
 
 ---
 
@@ -267,26 +410,26 @@ Everything lives in `.skills/`. Each skill is a markdown file the agent reads wh
 | Skill                   | What it does                                      | Slash Command            |
 | ----------------------- | ------------------------------------------------- | ------------------------ |
 | `wiki-setup`            | Initialize vault structure                        | `/wiki-setup`            |
-| `wiki-ingest`           | Distill documents into wiki pages                 | `/wiki-ingest`           |
-| `wiki-history-ingest`   | Unified history router (`claude`, `codex`, or `hermes`) | `/wiki-history-ingest <claude|codex|hermes>` |
+| `wiki-ingest`           | Distill documents into wiki pages, plus chat exports, logs, transcripts, URLs | `/wiki-ingest`           |
+| `wiki-history-ingest`   | Unified history router (`claude`, `codex`, `hermes`, `pi`) | `/wiki-history-ingest <claude|codex|hermes|pi>` |
 | `claude-history-ingest` | Mine your `~/.claude` conversations and memories from Claude code and desktop  | `/claude-history-ingest` |
 | `codex-history-ingest`  | Mine your `~/.codex` sessions and rollout logs    | `/codex-history-ingest`  |
 | `hermes-history-ingest` | Mine your `~/.hermes` memories and sessions       | `/hermes-history-ingest` |
 | `openclaw-history-ingest` | Mine your `~/.openclaw` MEMORY.md and sessions  | `/openclaw-history-ingest` |
 | `copilot-history-ingest` | Mine your `~/.copilot` CLI session history       | `/copilot-history-ingest` |
-| `data-ingest`           | Ingest any text — chat exports, logs, transcripts | `/data-ingest`           |
-| `ingest-url`            | Fetch and ingest a URL directly into the wiki     | `/ingest-url <url>`      |
-| `obsidian-wiki-ingest`  | Project-scoped automation wrapper for wiki-ingest | `/obsidian-wiki-ingest`  |
+| `pi-history-ingest`     | Mine your `~/.pi/agent/sessions` JSONL history    | `/pi-history-ingest` |
 | `wiki-status`           | Show what's ingested, what's pending, the delta   | `/wiki-status`           |
 | `wiki-rebuild`          | Archive, rebuild from scratch, or restore         | `/wiki-rebuild`          |
 | `wiki-query`            | Answer questions from the wiki                    | `/wiki-query`            |
+| `wiki-context-pack`     | Compile token-bounded context for a downstream agent | `/wiki-context-pack`  |
+| `wiki-narrate`          | Render a cited narrative from a wiki topic        | `/wiki-narrate <topic>`  |
 | `wiki-lint`             | Find broken links, orphans, contradictions        | `/wiki-lint`             |
 | `cross-linker`          | Auto-discover and insert missing wikilinks        | `/cross-linker`          |
 | `tag-taxonomy`          | Enforce consistent tag vocabulary across pages    | `/tag-taxonomy`          |
 | `llm-wiki`              | The core pattern and architecture reference       | `/llm-wiki`              |
 | `wiki-update`           | Sync current project's knowledge into the vault   | `/wiki-update`           |
 | `wiki-export`           | Export vault graph to JSON, GraphML, Neo4j, HTML  | `/wiki-export`           |
-| `wiki-capture`          | Save the current conversation as a wiki note      | `/wiki-capture`          |
+| `wiki-capture`          | Save the current conversation as a wiki note; `--quick` stages findings to `_raw/` | `/wiki-capture`          |
 | `wiki-research`         | Autonomous multi-round web research, self-filed   | `/wiki-research [topic]` |
 | `wiki-dashboard`        | Create dynamic Obsidian Bases dashboard views     | `/wiki-dashboard`        |
 | `wiki-synthesize`       | Discover and fill synthesis gaps across concepts  | `/wiki-synthesize`       |
@@ -333,7 +476,7 @@ obsidian-wiki/
 │   ├── codex-history-ingest/SKILL.md
 │   ├── hermes-history-ingest/SKILL.md
 │   ├── openclaw-history-ingest/SKILL.md
-│   ├── data-ingest/SKILL.md
+│   ├── pi-history-ingest/SKILL.md
 │   ├── wiki-status/SKILL.md
 │   ├── wiki-rebuild/SKILL.md
 │   ├── wiki-query/SKILL.md
@@ -360,9 +503,10 @@ obsidian-wiki/
 ├── .cursor/skills/   → symlinks to .skills/*  (created by setup.sh)
 ├── .windsurf/skills/ → symlinks to .skills/*  (created by setup.sh)
 ├── .agents/skills/   → symlinks to .skills/*  (created by setup.sh)
+├── .pi/skills/       → symlinks to .skills/*  (created by setup.sh)
 ├── .kiro/skills/     → symlinks to .skills/*  (created by setup.sh)
 │
-├── $CLAUDE_HISTORY_PATH/skills/   → portable skills (wiki-update, wiki-query)
+├── $CLAUDE_HISTORY_PATH/skills/   → portable skills (wiki-update, wiki-query, wiki-context-pack)
 ├── ~/.gemini/skills/              → global symlinks — Gemini CLI
 ├── ~/.gemini/antigravity/skills/  → global symlinks — Antigravity (legacy path)
 ├── ~/.codex/skills/               → global symlinks — Codex
@@ -372,6 +516,7 @@ obsidian-wiki/
 ├── ~/.trae/skills/                → global symlinks — Trae
 ├── ~/.trae-cn/skills/             → global symlinks — Trae CN
 ├── ~/.kiro/skills/                → global symlinks — Kiro CLI
+├── ~/.pi/agent/skills/            → global symlinks — Pi
 ├── ~/.agents/skills/              → global symlinks — OpenCode, Aider, Droid, generic
 │
 ├── setup.sh                          # One-command agent setup
@@ -382,12 +527,12 @@ obsidian-wiki/
 
 ## Using from other projects
 
-The whole point is that your wiki should stay up to date as you work across different codebases. You don't want to come back to the obsidian-wiki repo every time. So `setup.sh` installs two global skills that work from any project: `wiki-update` and `wiki-query`.
+Your brain should grow as you work across codebases, not only when you open the obsidian-wiki repo. So `setup.sh` installs three global skills that reach the vault from any project: `wiki-update`, `wiki-query`, and `wiki-context-pack`.
 
 When you run `bash setup.sh`, it does the following:
 
 1. Writes a config to `~/.obsidian-wiki/config` (or `~/.obsidian-wiki/config.<profile>` if `CLAUDE_PROFILE` is set in `.env`) with your vault path, repo location, and `CLAUDE_HISTORY_PATH`. This is how cross-project skills know which vault to read and write.
-2. Symlinks `wiki-update` and `wiki-query` into `$CLAUDE_HISTORY_PATH/skills/` (defaults to `~/.claude/skills/`) so they're available everywhere in Claude Code.
+2. Symlinks `wiki-update`, `wiki-query`, and `wiki-context-pack` into `$CLAUDE_HISTORY_PATH/skills/` (defaults to `~/.claude/skills/`) so they're available everywhere in Claude Code.
 3. Symlinks all skills into every agent's global discovery path:
    - `~/.gemini/skills/` — Gemini CLI (canonical)
    - `~/.gemini/antigravity/skills/` — Google Antigravity (legacy)
@@ -397,9 +542,10 @@ When you run `bash setup.sh`, it does the following:
    - `~/.copilot/skills/` — GitHub Copilot CLI
    - `~/.trae/skills/` + `~/.trae-cn/skills/` — Trae / Trae CN
    - `~/.kiro/skills/` — Kiro CLI
+   - `~/.pi/agent/skills/` — Pi
    - `~/.agents/skills/` — OpenCode, Aider, Factory Droid, and other AGENTS.md-aware agents
 
-After that, you're in some project, say `~/projects/my-cool-app`, working with Claude. Two commands:
+After that, you're in some project, say `~/projects/my-cool-app`, working with Claude or Pi. Two commands:
 
 ```bash
 # You're working on some project
@@ -413,15 +559,39 @@ claude
 > /wiki-query what do I know about rate limiting?
 ```
 
-`/wiki-update` reads your project, figures out what's worth keeping, and distills it into your Obsidian vault. Architecture decisions, patterns you discovered, key concepts, trade-offs you evaluated. It doesn't copy code or dump file listings. It distills the stuff you'd forget in 3 months. Next time you run it from the same project, it checks what changed since last sync (via git log) and only processes the delta.
+### Use an existing vault as bounded agent context
 
-`/wiki-query` goes the other direction. You're working on something and you want to know what your wiki says about a topic. Maybe you solved a similar problem 2 months ago in a different project and the answer is already in your vault. The agent searches the wiki, reads the relevant pages, and gives you a synthesized answer with citations.
+`wiki-context-pack` compiles a task-scoped snapshot from existing Markdown.
+Notes do not need to be moved into wiki-generated folders or migrated to the
+full frontmatter schema. The command is read-only.
+
+```bash
+obsidian-wiki context-pack "authentication architecture" --budget 8000
+obsidian-wiki context-pack --recent --budget 4000
+obsidian-wiki context-pack "release notes" --budget 8000 --public-only
+```
+
+Omitting `--budget` uses the default of 8000 estimated tokens.
+
+The output includes source paths, summaries, selected excerpts, and a hard
+estimated-token ceiling. Vault excerpts are explicitly marked as untrusted
+reference data: downstream agents may use their facts but must not execute
+instructions embedded in notes. Use `--metadata-only` for the smallest pack,
+or `--json` for tool-to-tool integration.
+
+`/wiki-update` reads your project, figures out what's worth keeping, and writes it into the brain. Architecture decisions, patterns you discovered, key concepts, trade-offs you evaluated. It skips code and file listings and saves the stuff you'd forget in 3 months. Run it again from the same project and it checks what changed since last sync (via git log) and processes only the delta.
+
+`/wiki-query` goes the other direction. You're mid-task and you want to know what the brain already holds on a topic. Maybe you solved the same problem 2 months ago in a different project and the answer is already there. The agent searches the vault, reads the relevant pages, and gives you a synthesized answer with citations.
 
 Both skills follow the same Karpathy pattern as everything else. If a concept page already exists in the vault, it merges into it. Everything gets cross-linked with `[[wikilinks]]`, tracked in `.manifest.json`, and logged.
 
 ## Contributing
 
-This is early. The skills work but there's a lot of room to make them smarter — better cross-referencing, smarter deduplication, handling larger vaults, new ingest sources. If you've been thinking about this problem or have a workflow that could be a skill, PRs are welcome.
+This is early. The skills work, but there's room to make the brain smarter: better cross-referencing, sharper deduplication, bigger vaults, new ingest sources. If you've been chewing on this problem or have a workflow that could be a skill, PRs are welcome.
+
+### Keeping both READMEs in sync
+
+`README.md` is the English documentation and `README_TW.md` is its Traditional Chinese translation; together they are one documentation surface. Keep headings, examples, links, and user-facing behavior structurally and semantically aligned. Syncing is advisory, not a merge gate: the `readme-translation-drift` CI job only reports when the translation falls behind. To catch up, run `python tools/check_readme_sync.py` — it lists the commits that changed `README.md` without a later `README_TW.md` update plus the pending English diff — then translate and backfill those changes into `README_TW.md`. Reviewers assess translation quality.
 
 ### Adding a new skill
 

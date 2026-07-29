@@ -2,7 +2,7 @@
 name: wiki-agent
 description: >
   Query-driven targeted ingest from a specific AI agent's raw history. Use this skill when the user
-  invokes /wiki-claude, /wiki-codex, /wiki-hermes, /wiki-openclaw, /wiki-copilot — with or without a
+  invokes /wiki-claude, /wiki-codex, /wiki-hermes, /wiki-openclaw, /wiki-copilot, /wiki-pi — with or without a
   search topic. Different from wiki-history-ingest (which bulk-ingests everything new): this skill finds
   sessions about a SPECIFIC TOPIC in a specific agent's history and ingests just those, then returns a
   synthesized answer immediately usable in the current session. Primary use case: you're working in
@@ -28,12 +28,13 @@ Parse the invocation to determine the target agent and optional query:
 | `/wiki-hermes [query]` | Hermes agent history | `/wiki-hermes "memory architecture"` |
 | `/wiki-openclaw [query]` | OpenClaw history | `/wiki-openclaw "project planning approach"` |
 | `/wiki-copilot [query]` | Copilot chat history | `/wiki-copilot "test strategy for API routes"` |
+| `/wiki-pi [query]` | Pi agent history | `/wiki-pi "how did I refactor the auth module"` |
 
 If no query is given, default to **recent sessions mode**: ingest the last 5 unprocessed sessions from that agent and return a summary of what was found. This is equivalent to a focused `wiki-history-ingest` for that agent only.
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH`.
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH`.
 2. Read `$OBSIDIAN_VAULT_PATH/.manifest.json` → know what's already ingested.
 3. Read `$OBSIDIAN_VAULT_PATH/hot.md` if it exists → warm context on recent wiki activity.
 
@@ -48,6 +49,7 @@ If no query is given, default to **recent sessions mode**: ingest the last 5 unp
 | `hermes` | `~/.hermes` | `HERMES_HOME` in env or `.env` |
 | `openclaw` | `~/.openclaw` | `OPENCLAW_HOME` in `.env` |
 | `copilot` | `~/.copilot` | `COPILOT_HISTORY_PATH` in `.env` |
+| `pi` | `~/.pi/agent/sessions` | `PI_HISTORY_PATH` in `.env` |
 
 If the history root doesn't exist, stop and tell the user: "No `<agent>` history found at `<path>`. Have you run `<agent>` on this machine? You can set a custom path with `<CONFIG_VAR>` in `.env`."
 
@@ -98,6 +100,14 @@ Session files:   varies by client (VS Code: ~/.copilot/sessions/*.jsonl or simil
 Signal fields:   session timestamps, file names
 ```
 
+### Pi
+```
+Primary index:   ~/.pi/agent/sessions/--<cwd>--/ directories
+Session files:   ~/.pi/agent/sessions/--<cwd>--/<timestamp>_<uuid>.jsonl
+Signal fields:   cwd (decoded from dir name), session_info.name, timestamp in filename
+```
+Scan session directories first. Decode `--<cwd>--` to get the working directory. Read the first line (session header) and any `session_info` entries for the session name. No separate index file — the filesystem is the index.
+
 ---
 
 ## Step 3: Score Sessions Against the Query
@@ -121,20 +131,20 @@ Open each selected session file and extract only the content relevant to the que
 
 **Claude** (JSONL conversation):
 - Each line: `{role, content, timestamp, ...}`
-- Search with: `grep -i "<query terms>" <session.jsonl>` to find the relevant lines
+- Search with: `rg -i "<query terms>" <session.jsonl>` to find the relevant lines
 - Extract: the surrounding conversation window (10 lines before + 20 lines after each hit)
 - Special signal: tool calls (Read/Write/Bash/Edit) reveal what was actually done — extract these even without keyword matches if they're in the relevant window
 
 **Codex** (rollout JSONL):
 - Each line: `{type: "session_meta|turn_context|event_msg|response_item", ...}`
 - Filter to `type: "event_msg"` (user turns) and `type: "response_item"` (model output)
-- Search with: `grep -i "<query terms>" <rollout.jsonl>`
+- Search with: `rg -i "<query terms>" <rollout.jsonl>`
 - Extract: matching turns + their parent context (the `turn_context` preceding the match)
 - Skip: `session_meta` events (operational metadata, not knowledge)
 
 **Hermes** (memory files + session JSONL):
 - For memory files: read the full file (they're short — typically <500 words each)
-- For session JSONL: `grep -i "<query terms>"` + surrounding window
+- For session JSONL: `rg -i "<query terms>"` + surrounding window
 - Memory files with title matches → read fully; others → grep only
 
 **OpenClaw** (MEMORY.md + daily notes + session JSONL):
@@ -146,6 +156,15 @@ Open each selected session file and extract only the content relevant to the que
 **Copilot** (session JSONL):
 - Same grep-window approach as Claude
 - Look for checkpoint files if available (pre-summarized)
+
+**Pi** (structured JSONL with tree layout):
+- Each line is a tree entry: `{type, id, parentId, timestamp, message?, ...}`
+- Build the active branch: map entries by `id`, find leaf (last entry with no children), walk `parentId` to root
+- Search with: `rg -i "<query terms>" <session.jsonl>` to find matching entries
+- Extract: the matching entries + their ancestors on the active branch (follow parent chain)
+- Special signal: `toolCall` blocks inside assistant messages reveal what was actually done — extract these even without keyword matches if they're in the relevant window
+- Prefer `compaction` and `branch_summary` entries when available — they're pre-synthesized summaries
+- Skip `thinking` content blocks (noise) and `model_change` / `thinking_level_change` entries
 
 ---
 
@@ -250,3 +269,44 @@ These are the primary use cases this skill is designed for:
 
 **No query — just "catch me up on recent Codex work"**
 → `/wiki-codex` — ingests last 5 Codex sessions and returns a summary
+
+**"I'm on Claude Code. What did I figure out about X in Pi?"**
+→ `/wiki-pi "X"` — finds Pi sessions about X, ingests them, returns the answer
+
+**No query — just "catch me up on recent Pi work"**
+→ `/wiki-pi` — ingests last 5 Pi sessions and returns a summary
+
+## QMD Refresh After Vault Writes
+
+QMD is a search index, not the source of truth. If `$QMD_WIKI_COLLECTION` is empty or unset, skip this step. Run it only after this skill has written or rewritten vault markdown. If QMD refresh fails, do not roll back the vault changes; report the QMD status separately.
+
+Use `$QMD_CLI` if set; otherwise use `qmd`.
+
+```bash
+${QMD_CLI:-qmd} update
+```
+
+If the output says vectors are needed or embeddings may be stale, run:
+
+```bash
+${QMD_CLI:-qmd} embed
+```
+
+Verify the collection with either:
+
+```bash
+${QMD_CLI:-qmd} ls "$QMD_WIKI_COLLECTION"
+```
+
+or, when a specific page path is known:
+
+```bash
+${QMD_CLI:-qmd} get "qmd://$QMD_WIKI_COLLECTION/<page>.md" -l 5
+```
+
+Record one of:
+- `QMD refreshed: update + embed + verified`
+- `QMD refreshed: update only + verified`
+- `QMD skipped: QMD_WIKI_COLLECTION unset`
+- `QMD skipped: qmd CLI unavailable`
+- `QMD failed: <short error summary>`

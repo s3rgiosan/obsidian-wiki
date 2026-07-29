@@ -1,10 +1,29 @@
 # Setup
 
-A skill-based framework for AI coding agents — Claude Code, Cursor, Windsurf, Gemini CLI, Google Antigravity, Codex, Hermes, OpenClaw, OpenCode, Aider, Factory Droid, Trae / Trae CN, Kiro, GitHub Copilot (CLI + VS Code Chat) — to build and maintain an Obsidian wiki using Karpathy's LLM Wiki pattern. No scripts, no API keys — the agent **is** the LLM.
+A skill-based framework for AI coding agents — Claude Code, Cursor, Windsurf, Pi, Gemini CLI, Google Antigravity, Codex, Hermes, OpenClaw, OpenCode, Aider, Factory Droid, Trae / Trae CN, Kiro, GitHub Copilot (CLI + VS Code Chat) — to build and maintain an Obsidian wiki using Karpathy's LLM Wiki pattern. No scripts, no API keys — the agent **is** the LLM.
 
 > Running `bash setup.sh` wires up every supported agent: project-local skill symlinks (`.claude/skills/`, `.cursor/skills/`, `.windsurf/skills/`, `.agents/skills/`, `.kiro/skills/`), global symlinks (`~/.claude/skills/`, `~/.gemini/skills/`, `~/.codex/skills/`, `~/.hermes/skills/`, `~/.openclaw/skills/`, `~/.copilot/skills/`, `~/.trae/skills/`, `~/.trae-cn/skills/`, `~/.kiro/skills/`, `~/.agents/skills/`), and always-on rule files (`CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.hermes.md`, `.cursor/rules/…`, `.windsurf/rules/…`, `.kiro/steering/…`, `.agent/rules/…`, `.agent/workflows/…`, `.github/copilot-instructions.md`). See the [Agent Compatibility table in README.md](README.md#agent-compatibility) for the full matrix.
 
-## Quick Start
+## Install via pip (no clone needed)
+
+```bash
+pip install obsidian-wiki
+obsidian-wiki setup --vault /path/to/your/vault
+```
+
+This does everything `setup.sh` does without a clone: writes `~/.obsidian-wiki/config` and installs every skill into all supported agents' skills directories (symlinked to the installed package, so `pip install -U obsidian-wiki` upgrades them everywhere). Add `--project .` to also drop project-local skills and the `AGENTS.md` / rule files into the current repo, or `--copy` to copy skill files instead of symlinking. Run `obsidian-wiki info` to see resolved paths.
+
+Useful local commands after setup:
+
+```bash
+obsidian-wiki doctor
+obsidian-wiki query "what do I know about rate limiting?"
+obsidian-wiki lint
+```
+
+The rest of this doc covers the `git clone` + `setup.sh` path.
+
+## Quick Start (git clone)
 
 ### 1. Set your vault path
 
@@ -31,13 +50,14 @@ Open this project in your coding agent and tell it what you want:
 | "/wiki-history-ingest claude" or "/wiki-history-ingest codex" | `wiki-history-ingest` |
 | "Import my Claude history" | `claude-history-ingest` |
 | "Import my Codex history" | `codex-history-ingest` |
-| "Process this ChatGPT export" | `data-ingest` |
+| "Import my Pi history" | `pi-history-ingest` |
+| "Process this ChatGPT export" | `wiki-ingest` |
 | "What's the status of my wiki?" | `wiki-status` |
 | "What do I know about X?" | `wiki-query` |
 | "Audit my wiki" | `wiki-lint` |
 | "Rebuild from scratch" | `wiki-rebuild` |
 
-The agent reads the skills from `.skills/`, reads `.env` for your vault path, and does the work.
+The agent reads the skills from `.skills/`, resolves the vault path via the Config Resolution Protocol (`@name` override → `.env` → `~/.obsidian-wiki/config`), and does the work.
 
 ### 3. Open in Obsidian
 
@@ -52,10 +72,11 @@ Anything text-based:
 | Markdown, PDFs, text files | `wiki-ingest` | Any document directory |
 | Claude Code history | `claude-history-ingest` | `~/.claude/` — conversations, memories, sessions |
 | Codex CLI history | `codex-history-ingest` | `~/.codex/` — sessions, rollouts, history index |
-| ChatGPT exports | `data-ingest` | `conversations.json` from ChatGPT export |
-| Slack / Discord logs | `data-ingest` | Channel export JSON files |
-| Meeting transcripts | `data-ingest` | Any text transcript |
-| Raw text dumps | `data-ingest` | Anything — CSV, logs, journals, notes |
+| Pi agent sessions | `pi-history-ingest` | `~/.pi/agent/sessions/` — tree-structured JSONL |
+| ChatGPT exports | `wiki-ingest` | `conversations.json` from ChatGPT export |
+| Slack / Discord logs | `wiki-ingest` | Channel export JSON files |
+| Meeting transcripts | `wiki-ingest` | Any text transcript |
+| Raw text dumps | `wiki-ingest` | Anything — CSV, logs, journals, notes |
 
 ## Tracking & Delta
 
@@ -117,6 +138,7 @@ Knowledge that's project-specific goes under `projects/<name>/`. Knowledge that'
 | `OBSIDIAN_MAX_PAGES_PER_INGEST` | Max pages updated per ingest | `15` |
 | `CLAUDE_HISTORY_PATH` | Where to find Claude data | *auto-discovers from `~/.claude`* |
 | `CODEX_HISTORY_PATH` | Where to find Codex data | *defaults to `~/.codex`* |
+| `PI_HISTORY_PATH` | Where to find Pi sessions | *defaults to `~/.pi/agent/sessions`* |
 | `LINT_SCHEDULE` | Wiki health check frequency | `weekly` |
 
 ## Skills Reference
@@ -125,11 +147,11 @@ Knowledge that's project-specific goes under `projects/<name>/`. Knowledge that'
 |---|---|
 | `llm-wiki` | Core pattern — 3-layer architecture, page templates, project org |
 | `wiki-setup` | Initialize vault structure, create index/log, configure Obsidian |
-| `wiki-ingest` | Distill source documents into wiki pages (append or full mode) |
-| `wiki-history-ingest` | Unified history ingest router (`claude` or `codex`) |
-| `data-ingest` | Ingest any raw text — chat exports, logs, transcripts, anything |
+| `wiki-ingest` | Distill source documents into wiki pages (append or full mode), plus any raw text — chat exports, logs, transcripts, anything |
+| `wiki-history-ingest` | Unified history ingest router (`claude`, `codex`, `pi`) |
 | `claude-history-ingest` | Mine `~/.claude` conversations and memories into wiki pages |
 | `codex-history-ingest` | Mine `~/.codex` sessions and rollout logs into wiki pages |
+| `pi-history-ingest` | Mine `~/.pi/agent/sessions` JSONL history into wiki pages |
 | `wiki-status` | Audit: what's ingested, what's pending, delta, recommend action |
 | `wiki-rebuild` | Archive current wiki, rebuild from scratch, or restore from archive |
 | `wiki-query` | Answer questions from the compiled wiki with citations |

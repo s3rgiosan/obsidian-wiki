@@ -8,7 +8,7 @@ This project is a **skill-based framework** for building and maintaining an Obsi
 
 ## Quick Orientation
 
-1. Read `~/.obsidian-wiki/config` (or `.env` in this repo) for `OBSIDIAN_VAULT_PATH` — this is where the wiki lives.
+1. Resolve config via `AGENTS.md`: honor an inline `@name` vault override first, then `.env`, then `~/.obsidian-wiki/config`. This gives `OBSIDIAN_VAULT_PATH` — where the wiki lives.
 2. Read `.manifest.json` at the vault root to see what's already been ingested.
 3. Skills are in `.skills/` (also at `.kiro/skills/`). Each subfolder has a `SKILL.md`.
 
@@ -17,14 +17,15 @@ This project is a **skill-based framework** for building and maintaining an Obsi
 | User says something like… | Read this skill |
 |---|---|
 | "set up my wiki" / "initialize" | `wiki-setup` |
-| "ingest" / "add this to the wiki" / "process these docs" | `wiki-ingest` |
+| "ingest" / "add this to the wiki" / "process these docs" / "process this export" / "ingest this data" | `wiki-ingest` |
 | "import my Claude history" / "mine my conversations" | `claude-history-ingest` |
 | "import my Codex history" | `codex-history-ingest` |
 | "import my Hermes history" | `hermes-history-ingest` |
 | "import my OpenClaw history" | `openclaw-history-ingest` |
-| "process this export" / "ingest this data" | `data-ingest` |
+| "import my Pi history" | `pi-history-ingest` |
 | "what's the status" / "show the delta" | `wiki-status` |
 | "what do I know about X" | `wiki-query` |
+| "use my vault as context" / "context pack for X" / "bounded context" | `wiki-context-pack` |
 | "audit" / "lint" / "find broken links" | `wiki-lint` |
 | "rebuild" / "archive" / "restore" | `wiki-rebuild` |
 | "link my pages" / "cross-reference" | `cross-linker` |

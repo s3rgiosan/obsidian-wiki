@@ -23,6 +23,9 @@ If `.env` doesn't exist, create it from `.env.example`. Ask the user for:
 2. **Where are your source documents?** → `OBSIDIAN_SOURCES_DIR`
    - Can be multiple paths, comma-separated
    - Default: `~/Documents`
+   - Local git repo clones (public or private, any host) can be listed here too — clone
+     the repo locally first, then add its path. See "Ingesting Git Repositories" in
+     `wiki-ingest/SKILL.md` for how repo sources are handled.
 
 3. **Want to import Claude history?** → `CLAUDE_HISTORY_PATH`
    - Default: auto-discovers from `~/.claude`
@@ -34,17 +37,42 @@ If `.env` doesn't exist, create it from `.env.example`. Ask the user for:
    - If using CLI mode, set `QMD_CLI_SEARCH_MODE=quality` by default; suggest `balanced` if reranking is too slow.
    - If unsure, skip for now — both skills fall back to `Grep` automatically.
    - Install instructions: see `.env.example` (QMD section).
+   - **If `QMD_WIKI_COLLECTION` is set, verify the collection excludes `_raw/`.** The wiki
+     collection and papers collection must stay disjoint — `wiki-query` cites them as
+     separate layers (compiled knowledge vs. raw staging), and `OBSIDIAN_VAULT_PATH` contains
+     `_raw/`, so a plain `qmd collection add <vault>` silently merges the two.
+     Read `~/.config/qmd/index.yml`, find the entry for `$QMD_WIKI_COLLECTION`, and check its
+     `ignore` list includes `_raw/**` (and ideally `log.md`, which has no semantic value). If
+     the collection doesn't exist yet, create it (`qmd collection add "$OBSIDIAN_VAULT_PATH"
+     --name <collection-name>`), then add the `ignore` block to `index.yml` by hand — `qmd`
+     has no `--ignore` flag and refuses a second `collection add` on a path that already has
+     one, so editing the YAML is the only way to scope it. Run `qmd update` after editing.
+     If the collection already exists without the `ignore` block, tell the user their
+     wiki collection is indexing `_raw/` (including `_raw/_archived/` drafts left behind by
+     `wiki-ingest`) and offer to add the `ignore` block and re-run `qmd update`.
+
+5. **Token budget warning threshold?** → `WIKI_TOKEN_WARN_THRESHOLD`
+   - Default: `100000` (warn when full-wiki read would cost > 100K tokens)
+   - Set to `0` to disable the warning entirely
+   - `wiki-status` shows a token footprint table and emits this warning automatically
+
+6. **Enable staged writes?** → `WIKI_STAGED_WRITES`
+   - Default: unset / `false` (pages written directly to their final location)
+   - Set to `true` for team wikis, high-stakes domains, or any vault where the human wants final say on every LLM-written page
+   - When enabled: all new/updated pages land in `_staging/` first; run `/wiki-stage-commit` to review and promote them
+   - `wiki-status` shows a "Staged writes pending" count when files are waiting
 
 ## Step 2: Create Vault Directory Structure
 
 ```bash
-mkdir -p "$OBSIDIAN_VAULT_PATH"/{concepts,entities,skills,references,synthesis,journal,projects,_archives,_raw,.obsidian}
+mkdir -p "$OBSIDIAN_VAULT_PATH"/{concepts,entities,skills,references,synthesis,journal,projects,_archives,_raw,_staging,.obsidian}
 ```
 
 - `.obsidian/` — Obsidian's own config. Creates vault recognition.
 - `projects/` — Per-project knowledge (populated during ingest).
 - `_archives/` — Stores wiki snapshots for rebuild/restore operations.
-- `_raw/` — Staging area for unprocessed drafts. Drop rough notes here; `wiki-ingest` will promote them to proper wiki pages and delete the originals.
+- `_raw/` — Staging area for unprocessed drafts. Drop rough notes here; `wiki-ingest` will promote them to proper wiki pages and move the originals into `_raw/_archived/` (created on first use).
+- `_staging/` — Review queue for LLM-written pages when `WIKI_STAGED_WRITES=true`. Pages here are not visible in Obsidian's graph until promoted via `/wiki-stage-commit`.
 
 ## Step 3: Create Special Files
 
@@ -115,6 +143,16 @@ updated: TIMESTAMP
 *None yet.*
 ```
 
+### .manifest.json
+
+Create an empty manifest so ingest skills have a tracking file to append to and
+`obsidian-wiki doctor` reports the vault as complete (it treats `.manifest.json`
+as a required core file):
+
+```bash
+printf '{}\n' > "$OBSIDIAN_VAULT_PATH/.manifest.json"
+```
+
 ## Step 4: Create .obsidian Configuration
 
 Create minimal Obsidian config for a good out-of-box experience:
@@ -152,8 +190,10 @@ Run a quick sanity check:
 - [ ] `index.md` exists at vault root
 - [ ] `log.md` exists at vault root
 - [ ] `hot.md` exists at vault root
+- [ ] `.manifest.json` exists at vault root (empty `{}` is fine)
 - [ ] `.env` has `OBSIDIAN_VAULT_PATH` set
 - [ ] `.obsidian/` directory exists
+- [ ] `_staging/` directory exists (required even when `WIKI_STAGED_WRITES` is not set — created on setup for future use)
 - [ ] Source directories (if configured) exist and are readable
 
 Report the results and tell the user they can now:
@@ -163,3 +203,105 @@ Report the results and tell the user they can now:
 4. Run `claude-history-ingest` to mine their Claude conversations
 5. Run `codex-history-ingest` to mine their Codex sessions (if they use Codex)
 6. Run `wiki-status` again anytime to check the delta
+
+## Optional: Install the Stop Hook (Auto-Capture)
+
+Ask the user: **"Want to auto-capture findings at session end?"**
+
+If yes, install the Stop hook into their global Claude Code settings so that every session
+with meaningful work automatically prompts `/wiki-capture --quick` before closing.
+
+**What the hook does:** reads the session transcript on Stop, counts file edits and shell
+calls, and if significant work happened, asks Claude to run `/wiki-capture --quick` once.
+The `wiki-capture` quick-mode KEEP/SKIP gate prevents noise — routine or
+inconclusive sessions are skipped automatically.
+
+**Installation steps:**
+
+1. Find the obsidian-wiki repo path. If `OBSIDIAN_WIKI_REPO` is set in config, use that.
+   Otherwise, check common locations: `~/Documents/projects/obsidian-wiki`, `~/obsidian-wiki`,
+   or ask the user.
+
+2. Locate the `wiki-stop-capture.sh` script. Its path differs between a pip/uv install and a
+   source checkout, so check both layouts under `<REPO_PATH>` and use the first that exists:
+
+   - `<REPO_PATH>/hooks/wiki-stop-capture.sh` — packaged install (`OBSIDIAN_WIKI_REPO`
+     points at the bundled `_data/` dir, which ships the hook under `hooks/`).
+   - `<REPO_PATH>/.claude/hooks/wiki-stop-capture.sh` — source checkout.
+
+   If neither exists (e.g. an older wheel that predates bundling the hook), fetch the canonical
+   copy to a stable location and point at that instead:
+
+   ```bash
+   mkdir -p ~/.obsidian-wiki/hooks
+   curl -fsSL https://raw.githubusercontent.com/Ar9av/obsidian-wiki/main/.claude/hooks/wiki-stop-capture.sh \
+     -o ~/.obsidian-wiki/hooks/wiki-stop-capture.sh
+   chmod +x ~/.obsidian-wiki/hooks/wiki-stop-capture.sh
+   ```
+
+   Use the resolved absolute path as `<HOOK_PATH>` below.
+
+3. Merge the hook entry into `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash <HOOK_PATH>"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+   If `~/.claude/settings.json` already exists and has a `hooks.Stop` array, **append** the new
+   entry rather than replacing — don't clobber existing hooks.
+
+   > **Note — expect a duplicate nudge inside this repo.** The obsidian-wiki repo ships its own
+   > git-tracked `.claude/settings.json` registering the same Stop hook at a relative path. Claude
+   > Code *merges* project-level and user-level hook config rather than letting one override the
+   > other, so sessions ending inside the repo itself fire both registrations. This is expected and
+   > harmless — the hook claims an atomic per-session sentinel, so only one nudge is emitted. Leave
+   > both in place: removing the project entry dirties a tracked framework file and disables capture
+   > for anyone who clones the repo without doing the global install.
+
+4. Confirm: "Stop hook installed. Claude Code will prompt `/wiki-capture --quick` at the
+   end of any session where you write files or run ≥ 4 shell commands."
+
+**To uninstall later:** remove the hook entry from `~/.claude/settings.json` or set
+`HIVEMIND_CAPTURE=false` in your shell to skip capture for a single session.
+
+## Optional: Configure GitHub Sync
+
+Ask the user: **"Want to sync your vault to a private GitHub repo?"**
+
+The vault is plain markdown, so pushing it to git gets you version history, backup, and
+cross-device sync for free. This is opt-in — skip it if the user declines or has no repo ready.
+
+If yes:
+
+1. Ask for the repo URL (e.g. `https://github.com/you/my-wiki.git`). Recommend it be **private**
+   if the vault holds personal notes.
+2. Run the CLI, which handles `git init`, a default `.gitignore`, and wiring the `origin` remote —
+   this is the same code path `obsidian-wiki setup`'s interactive prompt and `setup.sh` use, so
+   there's one implementation to keep correct (see issue #153 for why that matters):
+   ```bash
+   obsidian-wiki sync-setup "<repo-url>" --vault "$OBSIDIAN_VAULT_PATH"
+   ```
+   If the `obsidian-wiki` binary isn't on PATH (source checkout without an install), run it from
+   the repo instead: `PYTHONPATH="$OBSIDIAN_WIKI_REPO" python3 -m obsidian_wiki.cli sync-setup ...`
+   using whichever of `OBSIDIAN_WIKI_REPO` or a local checkout path is available.
+3. Tell the user they can run `obsidian-wiki sync` any time afterward to commit and push pending
+   vault changes (stages everything, commits with a timestamp, pushes). There's no config file to
+   check for sync status — the vault's own `git remote` is the source of truth.
+
+## Optional: Refresh QMD After Setup
+
+If `QMD_WIKI_COLLECTION` is configured and the local QMD CLI is available, run `qmd update` after the initial vault files exist so the fresh vault is immediately queryable. No embedding pass is usually needed at setup time because the vault starts empty, so a plain update is enough unless you have already populated pages. Before running it, confirm the `_raw/` exclusion described in Step 1.4 is in place — otherwise this update indexes the (currently empty) staging directory into the wiki collection too, and every future draft dropped there joins it silently.

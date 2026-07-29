@@ -84,6 +84,8 @@ try:
 except Exception:
     print(0)
     sys.exit()
+if last_updated.tzinfo is None:
+    last_updated = last_updated.replace(tzinfo=timezone.utc)
 
 vault_path = os.environ.get("OBSIDIAN_VAULT_PATH", "")
 stale = 0
