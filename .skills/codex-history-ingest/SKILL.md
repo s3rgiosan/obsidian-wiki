@@ -1,11 +1,7 @@
 ---
 name: codex-history-ingest
 description: >
-  Ingest Codex CLI conversation history into the Obsidian wiki. Use this skill when the user wants to mine
-  their past Codex sessions for knowledge, import their ~/.codex folder, extract insights from previous coding
-  sessions, or says things like "process my Codex history", "add my Codex conversations to the wiki", or
-  "what have I discussed in Codex before". Also triggers when the user mentions .codex sessions, rollout files,
-  session_index.jsonl, or Codex transcript logs.
+  Ingest Codex CLI conversation/session history into Obsidian as distilled knowledge. Use for importing or mining ~/.codex sessions, rollout files, indexes, or transcript logs; use wiki-agent for targeted topic-only recall.
 ---
 
 # Codex History Ingest — Conversation Mining
@@ -16,7 +12,10 @@ This skill can be invoked directly or via the `wiki-history-ingest` router (`/wi
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `CODEX_HISTORY_PATH` (defaults to `~/.codex`)
+**Writing profile:** Before drafting or rewriting natural-language Markdown, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+`WRITING.md` preferences apply only to newly drafted or rewritten natural-language Markdown; preserve source content and structured records.
+
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `CODEX_HISTORY_PATH` (defaults to `~/.codex`)
 2. Read `.manifest.json` at the vault root to check what has already been ingested
 3. Read `index.md` at the vault root to understand what the wiki already contains
 
@@ -190,13 +189,19 @@ Add/update a top-level project/session summary block:
 
 ### Update special files
 
-Update `index.md` and `log.md`:
+Update `index.md`, `log.md`, and `hot.md` with one locked call:
 
-```
-- [TIMESTAMP] CODEX_HISTORY_INGEST sessions=N pages_updated=X pages_created=Y mode=append|full
+```bash
+obsidian-wiki memory sync CODEX_HISTORY_INGEST \
+  sessions=<sessions> pages_updated=<pages_updated> \
+  pages_created=<pages_created> mode=<mode> \
+  --takeaways "Ingested 12 Codex sessions; surfaced recurring patterns in CLI tooling and shell scripting."
 ```
 
-**`hot.md`** — Read `$OBSIDIAN_VAULT_PATH/hot.md` (create from the template in `wiki-ingest` if missing). Update **Recent Activity** with a one-line summary — e.g. "Ingested 12 Codex sessions; surfaced recurring patterns in CLI tooling and shell scripting." Keep the last 3 operations. Update `updated` timestamp.
+Never hand-edit `index.md`, `log.md`, or `hot.md` — the command takes the lock that keeps a parallel writer from dropping your update. `--takeaways` is the one-line conceptual summary that used to go in Recent Activity;
+omit it to leave the previous takeaways untouched.
+
+See `.skills/llm-wiki/references/MEMORY.md` for the full procedure.
 
 ## Privacy and Compliance
 

@@ -1,11 +1,7 @@
 ---
 name: wiki-update
 description: >
-  Sync the current project's knowledge into the Obsidian wiki. Use this skill from any project
-  when the user says "update wiki", "sync to wiki", "save this to my wiki", "update obsidian",
-  or wants to distill what they've been working on into their knowledge base. This is the
-  cross-project skill that lets you push knowledge from wherever you are into the vault. Accepts
-  inline named-vault routing like "@work update wiki" via the shared Config Resolution Protocol.
+  Sync knowledge from the current project into the Obsidian wiki. Use when work already in the current project should be distilled into the vault; named-vault routing includes @work update wiki. wiki-capture saves the current conversation and wiki-ingest handles external/new sources.
 ---
 
 # Wiki Update — Sync Any Project to Your Wiki
@@ -14,8 +10,10 @@ You are distilling knowledge from the current project into the user's Obsidian w
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH`, `OBSIDIAN_WIKI_REPO`, `OBSIDIAN_LINK_FORMAT` (`wikilink` default or `markdown`), and optional QMD settings such as `QMD_WIKI_COLLECTION`. Works from any project directory.
-2. If no config file exists, tell the user to set `CLAUDE_HISTORY_PATH` in `.env` and run `bash setup.sh`.
+**Writing profile:** Before drafting or rewriting natural-language Markdown, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+`WRITING.md` preferences apply only to newly drafted or rewritten natural-language Markdown; preserve source content and structured records.
+
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH`, `OBSIDIAN_WIKI_REPO`, `OBSIDIAN_LINK_FORMAT` (`wikilink` default or `markdown`), and optional QMD settings such as `QMD_WIKI_COLLECTION`. Works from any project directory.
 3. Read `$OBSIDIAN_VAULT_PATH/.manifest.json` to check if this project has been synced before.
 4. Read `$OBSIDIAN_VAULT_PATH/index.md` to know what the wiki already contains.
 
@@ -69,6 +67,34 @@ Not worth distilling:
 - Routine changes anyone could read from the diff
 
 The heuristic: **if reading the codebase answers the question, don't wiki it. If you'd have to re-derive the reasoning by reading git blame across 20 commits, wiki it.**
+
+### Step 3b: Build a code-understanding focus map (optional)
+
+**GUARD: If the `obsidian-wiki code-understand` command fails or is unavailable, skip this step and continue — it is an optimisation, not a requirement.**
+
+When this project contains code, run the local code-understanding extractor before distilling. It parses the codebase locally and returns a focus map — the ranked files and symbols the architecture hangs on — so you read the load-bearing parts instead of scanning everything.
+
+```bash
+obsidian-wiki code-understand --project "$(pwd)" --pretty
+```
+
+When this is not the first sync (Step 2 computed `last_commit_synced`), seed the focus map from the delta:
+
+```bash
+obsidian-wiki code-understand --project "$(pwd)" --since <last_commit_synced> --pretty
+```
+
+(First sync: omit `--since`.)
+
+#### What to do with the focus-map output
+
+1. **Read the output selectively** — when `backend: codegraph`, treat focus-map entries as structural facts with `file:line` citations; when `backend: builtin`, treat `defines`/`imports` entries as facts but treat `rg-reference` entries as weaker evidence — open the file and verify before citing. Open only the ranked `files`/`file:lines` the focus map points at; never paste the JSON into the wiki or the vault.
+2. **Cite the evidence** — every architectural claim written to a page references its evidence as `(file:lines)` from the focus map or from the opened source; keep using the existing provenance markers.
+3. **Prune stale relationships (required)** — when updating an existing `projects/<name>/` page, cross-check each previously recorded code relationship against the current focus map (or `obsidian-wiki ast-extract` for a symbol-level recheck). Remove relationships whose target symbol no longer exists or is no longer reachable; update the page and record the removals in `log.md`. This keeps false positives from accumulating.
+4. **Never** write `.codegraph/` or the `code-understand` JSON into `$OBSIDIAN_VAULT_PATH` — the graph is a cache/sidecar in the project repo, not wiki knowledge.
+5. **Offer CodeGraph when it's missing (optional)** — if the output reports `backend: builtin` because codegraph is unavailable and the user wants the enhanced backend, offer to install it for them: `npm install -g @colbymchenry/codegraph` (or set `CODE_UNDERSTANDING_CODEGRAPH_BIN` to an existing binary), then re-run this step so the focus map uses the graph. Never install without the user's go-ahead, and never let a missing codegraph block the sync.
+
+If `obsidian-wiki` is not installed or the command fails, skip this step and proceed to Step 4 as normal — it is an optimisation, not a requirement.
 
 ## Step 4: Distill into Wiki Pages
 
@@ -163,13 +189,14 @@ After creating/updating pages:
 
 ### Update `.manifest.json`
 
-Add or update this project's entry:
+Add or update this project's entry. The project identity must be portable across machines: record the repository URL in `source_repo` (from `git remote get-url origin`, normalised to `host/owner/name`), and only an optional `source_cwd_hint` for where this machine happens to have it checked out. Never write a machine absolute path — see `llm-wiki/SKILL.md` → `.manifest.json` (Source key contract v2).
 
 ```json
 {
   "projects": {
     "<project-name>": {
-      "source_cwd": "/absolute/path/to/project",
+      "source_repo": "github.com/owner/<project-name>",
+      "source_cwd_hint": "~/code/<project-name>",
       "last_synced": "TIMESTAMP",
       "last_commit_synced": "abc123f",
       "pages_in_vault": ["projects/<project-name>/<project-name>.md", "..."]
@@ -178,22 +205,35 @@ Add or update this project's entry:
 }
 ```
 
+If the project is not a git repository, use a `repo:<stable-name>` pseudo-key for `source_repo` and keep `source_cwd_hint` as the only location field.
+
 ### Update `index.md`
 
 Add entries for any new pages created.
 
-### Update `log.md`
+### Update `index.md`, `log.md`, and `hot.md`
 
-Append:
+One locked call, not three hand edits:
+
+```bash
+obsidian-wiki memory sync WIKI_UPDATE project=<project-name>
+  pages_created=X pages_updated=Y \
+  source_repo=github.com/owner/<project-name> \
+  --takeaways "Synced obsidian-wiki — wiki-capture and wiki-research added; the new capabilities are autonomous web research and conversation capture."
 ```
-- [TIMESTAMP] WIKI_UPDATE project=<project-name> pages_updated=X pages_created=Y source_cwd=/path/to/project
+
+`--takeaways` should carry the most important architectural insight or decision
+surfaced during this sync, written conceptually rather than as a file list. Omit
+it to leave the previous takeaways untouched.
+
+If this project is an ongoing focus, record the thread so the next session picks
+it up:
+
+```bash
+obsidian-wiki memory todo add "<the open thread>" --origin projects/<project-name>.md
 ```
 
-### Update `hot.md`
-
-Read `$OBSIDIAN_VAULT_PATH/hot.md` (create from the template in `wiki-ingest` if missing). Rewrite **Recent Activity** with what was just synced — last 3 operations max. Update **Active Threads** if this project is an ongoing focus. Update **Key Takeaways** with the most important architectural insight or decision surfaced during this sync. Update `updated` timestamp.
-
-Write conceptually: "Synced obsidian-wiki — added wiki-capture and wiki-research skills, core new capabilities are autonomous web research and conversation capture."
+See `.skills/llm-wiki/references/MEMORY.md` for the full procedure.
 
 ## Step 7: Refresh QMD Wiki Index (optional — requires `QMD_WIKI_COLLECTION`)
 

@@ -31,6 +31,9 @@ import hashlib
 import json
 import os
 import re
+import sys
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, TypedDict
@@ -46,7 +49,8 @@ class CheckResult(TypedDict):
     new: list[str]
     modified: list[str]
     unchanged: list[str]
-    missing: list[str]   # in manifest but file no longer on disk
+    missing: list[str]   # vault-local source in manifest but no longer on disk
+    unavailable: list[str]  # machine-local source absent here (e.g. synced from another host)
 
 
 def _manifest_path(vault: Path) -> Path:
@@ -74,13 +78,115 @@ def _load_manifest(vault: Path):
     return _load_raw(vault).get("sources", {})
 
 
+def _lock_path(vault: Path) -> Path:
+    return vault / ".manifest.lock"
+
+
+class AdvisoryLockTimeout(RuntimeError):
+    """Raised when an advisory lockfile could not be claimed within the timeout."""
+
+
+class ManifestLockTimeout(AdvisoryLockTimeout):
+    """Raised when the manifest lock could not be acquired within the timeout."""
+
+
+@contextmanager
+def advisory_lock(
+    lock: Path,
+    *,
+    timeout: float = 10.0,
+    stale_after: float = 60.0,
+    error_cls: type = AdvisoryLockTimeout,
+):
+    """Claim *lock* as an advisory lockfile for a read-modify-write.
+
+    ``O_CREAT | O_EXCL`` is the portable stdlib primitive here — ``fcntl`` is
+    POSIX-only and this ships on Windows. A lockfile older than *stale_after*
+    is assumed to belong to a crashed process and is stolen.
+
+    Shared by the manifest writer and the prose-memory writer
+    (:mod:`obsidian_wiki.memory`) so both serialise the same way.
+    """
+    deadline = time.monotonic() + timeout
+    fd = None
+    while True:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - lock.stat().st_mtime
+            except FileNotFoundError:
+                continue  # holder released it between our open and stat
+            if age > stale_after:
+                # ponytail: last-writer-wins steal; a pid check would narrow the
+                # window if two processes ever race to steal the same stale lock
+                try:
+                    lock.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            if time.monotonic() >= deadline:
+                raise error_cls(
+                    f"could not acquire {lock} within {timeout}s "
+                    f"(held for {age:.1f}s; stale after {stale_after}s)"
+                )
+            time.sleep(0.1)
+    try:
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        fd = None
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+        try:
+            lock.unlink()
+        except FileNotFoundError:
+            pass
+
+
+@contextmanager
+def manifest_lock(vault: Path, *, timeout: float = 10.0, stale_after: float = 60.0):
+    """Advisory lock around a manifest read-modify-write.
+
+    Parallel ingest agents (``batch-plan`` fan-out) and the Docker server can
+    all write one vault's manifest; without this the read-modify-write races
+    and a whole entry is silently lost.
+    """
+    # ponytail: whole-manifest advisory lock; per-entry locking if batch fan-out ever contends
+    with advisory_lock(
+        _lock_path(vault),
+        timeout=timeout,
+        stale_after=stale_after,
+        error_cls=ManifestLockTimeout,
+    ):
+        yield
+
+
+def _write_manifest(vault: Path, manifest: dict) -> None:
+    """Atomically replace the manifest file — no torn reads, no partial file."""
+    target = _manifest_path(vault)
+    tmp = target.with_name(f".manifest.json.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        os.replace(tmp, target)  # atomic on POSIX and Windows
+    except BaseException:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def _save_manifest(vault: Path, sources) -> None:
     """Write *sources* back into the manifest, preserving other top-level keys."""
-    manifest = _load_raw(vault)
-    manifest["sources"] = sources
-    _manifest_path(vault).write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    with manifest_lock(vault):
+        manifest = _load_raw(vault)
+        manifest["sources"] = sources
+        _write_manifest(vault, manifest)
 
 
 def _iter_entries(sources) -> Iterator[tuple[str | None, dict]]:
@@ -103,6 +209,12 @@ def _iter_entries(sources) -> Iterator[tuple[str | None, dict]]:
 # prefix that shouldn't be treated as a filesystem path.
 _SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:[^\\/]")
 
+# A Windows drive-absolute path ("C:\dir\file", "C:/dir/file"). On POSIX this is
+# not a path at all, so it cannot be resolved and is machine-specific; lint.py
+# recognises the same shape when reporting stored keys. Kept local rather than
+# imported so the runtime cache carries no dependency on the lint module.
+_WINDOWS_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
 
 def _strip_algo(value: str | None) -> str:
     """Drop an optional ``algo:`` prefix so ``sha256:<hex>`` == ``<hex>``."""
@@ -122,33 +234,143 @@ def _is_file_key(key: str | None) -> bool:
     return bool(key) and "://" not in key and not _SCHEME_RE.match(key)
 
 
-def _same_source(stored_key: str | None, query: Path, vault: Path) -> bool:
+def _expand_key(key: str) -> str:
+    """Expand ``~`` and environment variables, but only when the key uses them.
+
+    A plain vault-relative key like ``Raw/x.pdf`` must survive untouched, so the
+    expansion is gated rather than applied unconditionally.
+    """
+    if key.startswith("~") or "$" in key:
+        return os.path.expandvars(os.path.expanduser(key))
+    return key
+
+
+def resolve_key(key: str | None, vault: Path) -> Path | None:
+    """Normalize a manifest key to an absolute path, or ``None`` for non-file keys.
+
+    Resolution order (the source key contract v2, see ``llm-wiki/SKILL.md``):
+
+    1. pseudo-key (``scheme:`` / ``://``) -> ``None`` — an opaque identifier, not
+       a filesystem location;
+    2. ``~``- or env-var-bearing key -> expand;
+    3. absolute path -> use as-is (legacy compatibility);
+    4. anything else -> resolve against the vault root.
+    """
+    if not _is_file_key(key):
+        return None
+    path = Path(_expand_key(key))
+    return path if path.is_absolute() else (vault / path)
+
+
+def stored_key(path: Path, vault: Path) -> str | None:
+    """Return the portable manifest key for *path*, or ``None`` if not portable.
+
+    In-vault sources become vault-relative (``Raw/x.pdf``); sources under
+    ``$HOME`` become home-relative (``~/.claude/...``); anything else has no
+    machine-portable representation and needs an explicit pseudo-key from the
+    caller (``repo:``, ``url:``, ``agent:``).
+    """
+    p = Path(os.path.abspath(_expand_key(str(path))))
+    vault_root = Path(os.path.abspath(_expand_key(str(vault))))
+    home_root = Path(os.path.expanduser("~"))
+    for root, prefix in ((vault_root, ""), (home_root, "~/")):
+        try:
+            rel = p.relative_to(root)
+        except ValueError:
+            continue
+        if rel == Path("."):
+            return None
+        return prefix + rel.as_posix()
+    return None
+
+
+def _same_source(stored_key_value: str | None, query: Path, vault: Path) -> bool:
     """True if a manifest key refers to the same source as *query*.
 
-    Matches on the raw string first (covers URLs and pseudo-keys), then on the
-    resolved absolute form (relative keys resolve against the vault root), so a
-    caller-supplied absolute path matches a manifest's vault-relative key.
+    Matches on the raw string first (covers pseudo-keys), then on the resolved
+    absolute form so an absolute query matches a vault-relative or home-relative
+    stored key.
     """
-    if not stored_key:
+    if not stored_key_value:
         return False
-    if str(query) == stored_key:
+    if str(query) == stored_key_value:
         return True
-    if not _is_file_key(stored_key):
+    stored_path = resolve_key(stored_key_value, vault)
+    if stored_path is None:
         return False
-    k = Path(stored_key)
-    k_abs = k if k.is_absolute() else (vault / k)
     try:
-        return k_abs.resolve() == query.resolve()
+        return stored_path.resolve() == query.resolve()
     except OSError:
         return False
 
 
 def _missing_on_disk(key: str | None, vault: Path) -> bool:
     """True if a filesystem-style manifest key has no file on disk."""
-    if not _is_file_key(key):
+    path = resolve_key(key, vault)
+    if path is None:
         return False
-    resolved = Path(key) if os.path.isabs(key) else (vault / key)
-    return not resolved.exists()
+    return not path.exists()
+
+
+def _vault_top_names(vault: Path) -> set[str]:
+    """Names of the vault's top-level entries, or an empty set if unreadable."""
+    try:
+        return {p.name for p in vault.iterdir()}
+    except OSError:
+        return set()
+
+
+def _is_vault_local(key: str | None, vault: Path, top_names: set[str] | None = None) -> bool:
+    """True if a file key names a source that travels with the vault.
+
+    Vault-local sources travel with the vault, so their absence is a real loss
+    (``missing``). A key that is machine-specific *and* points outside this vault
+    (``/home/other/wiki/x.md``, ``~/.claude/...``) may simply not exist on the
+    machine reading a synced vault, so it is reported under ``unavailable``. An
+    absolute or ``~``-relative path that resolves *inside* this vault is still
+    vault-local — machine-specific in form, but not in target.
+
+    A *relative* key resolves lexically inside the vault even when it is really
+    relative to some other root — the legacy ingest-root keys such as
+    ``-Users-x-github/abc.jsonl``. Path shape cannot tell those apart from vault
+    keys, so the vault's own topology decides: the first segment must name a real
+    top-level entry. That also gives the honest answer for an out-of-vault source
+    parked in a namespace the vault does not contain (``external/.hermes/...``):
+    unavailable, not missing. When the vault cannot be listed the lexical answer
+    stands, so an I/O hiccup never hides a real loss.
+
+    A key written for another OS — a drive-letter path or one using backslashes
+    as separators — cannot be resolved on this host, so it is machine-specific
+    (``unavailable``) rather than a vault-relative key.
+    """
+    path = resolve_key(key, vault)
+    if path is None:
+        return False
+    raw = str(key)
+    try:
+        rel = Path(os.path.abspath(str(path))).relative_to(Path(os.path.abspath(str(vault))))
+    except ValueError:
+        return False
+    if rel == Path("."):
+        return False
+    if os.name != "nt" and ("\\" in raw or _WINDOWS_ABS_RE.match(raw)):
+        # A key written for another OS: a backslash is not a separator here and a
+        # drive-letter path cannot be resolved, so this is machine-specific — not
+        # a vault source whose file went away.
+        return False
+    if os.path.isabs(raw) or raw.startswith("~") or "$" in raw:
+        return True
+    if "/" not in raw and "\\" not in raw:
+        # A bare filename at the vault root. There is no leading component that
+        # could be a foreign root, so this is a vault source by construction —
+        # and if it is gone, that is a real vault-local loss. The backslash guard
+        # keeps a Windows-form key out of this shortcut on every platform.
+        return True
+    if top_names is None:
+        top_names = _vault_top_names(vault)
+    if not top_names:
+        return True
+    return rel.parts[0] in top_names
 
 
 def sha256_file(path: Path, chunk: int = 1 << 20) -> str:
@@ -166,9 +388,9 @@ def sha256_file(path: Path, chunk: int = 1 << 20) -> str:
 def sha256_dir(path: Path) -> str:
     """Stable SHA-256 over all files in a directory tree (sorted by relative path)."""
     h = hashlib.sha256()
-    for fp in sorted(path.rglob("*")):
+    for fp in sorted(path.rglob("*"), key=lambda p: p.relative_to(path).as_posix()):
         if fp.is_file():
-            rel = str(fp.relative_to(path))
+            rel = fp.relative_to(path).as_posix()
             h.update(rel.encode())
             h.update(sha256_file(fp).encode())
     return h.hexdigest()
@@ -180,44 +402,85 @@ def compute_hash(path: Path) -> str:
     return sha256_file(path)
 
 
+def _resolved_form(path: Path) -> str | None:
+    """``realpath`` of *path* as a comparable string, or ``None`` if it cannot be resolved.
+
+    ``os.path.normcase`` keeps the comparison equivalent to ``Path`` equality on
+    case-insensitive filesystems.
+    """
+    try:
+        return os.path.normcase(str(path.resolve()))
+    except OSError:
+        return None
+
+
 def check_sources(vault: Path, source_paths: list[Path]) -> CheckResult:
     """Classify each source as new / modified / unchanged vs. the manifest.
 
     Also reports manifest entries whose source file no longer exists on disk.
     Handles both manifest shapes and compares hashes prefix-insensitively.
+
+    Every entry and every query is resolved once and matched through an index
+    of its forms (raw key, resolved path).  Resolving is a ``realpath`` walk —
+    one ``lstat`` per path component — so doing it per (entry, query) pair, as
+    the first-match scan did, made a 3,000-entry manifest cost about a second
+    per queried file.  The index keeps the first entry for each form, which is
+    what the scan's ``break`` on first hit returned.
     """
     entries = list(_iter_entries(_load_manifest(vault)))
-    result: CheckResult = {"new": [], "modified": [], "unchanged": [], "missing": []}
+    result: CheckResult = {
+        "new": [], "modified": [], "unchanged": [], "missing": [], "unavailable": []
+    }
+
+    by_form: dict[str, int] = {}
+    entry_resolved: list[str | None] = []
+    for i, (stored_key, _entry) in enumerate(entries):
+        resolved = None
+        if stored_key:
+            by_form.setdefault(stored_key, i)
+            stored_path = resolve_key(stored_key, vault)
+            if stored_path is not None:
+                resolved = _resolved_form(stored_path)
+                if resolved is not None:
+                    by_form.setdefault(resolved, i)
+        entry_resolved.append(resolved)
 
     matched: set[int] = set()
+    query_forms: set[str] = set()
     for path in source_paths:
         key = str(path)
+        forms = [key]
+        resolved = _resolved_form(path)
+        if resolved is not None:
+            forms.append(resolved)
+        query_forms.update(forms)
         if not path.exists():
             result["missing"].append(key)
             continue
         current_hash = _strip_algo(compute_hash(path))
-        entry = None
-        for i, (stored_key, e) in enumerate(entries):
-            if _same_source(stored_key, path, vault):
-                entry = e
-                matched.add(i)
-                break
-        if entry is None:
+        hits = [by_form[f] for f in forms if f in by_form]
+        if not hits:
             result["new"].append(key)
-        elif _strip_algo(entry.get("content_hash")) != current_hash:
+            continue
+        i = min(hits)   # the earliest entry matching by either form — the old scan's first hit
+        matched.add(i)
+        entry = entries[i][1]
+        if _strip_algo(entry.get("content_hash")) != current_hash:
             result["modified"].append(key)
         else:
             result["unchanged"].append(key)
 
     # Report manifest entries whose source file no longer exists on disk and
     # that weren't among the scanned paths (in any path form).
+    top_names = _vault_top_names(vault)
     for i, (stored_key, _entry) in enumerate(entries):
         if i in matched:
             continue
-        if any(_same_source(stored_key, p, vault) for p in source_paths):
+        if stored_key in query_forms or (entry_resolved[i] is not None and entry_resolved[i] in query_forms):
             continue
         if _missing_on_disk(stored_key, vault):
-            result["missing"].append(stored_key)
+            bucket = "missing" if _is_vault_local(stored_key, vault, top_names) else "unavailable"
+            result[bucket].append(stored_key)
 
     return result
 
@@ -227,17 +490,68 @@ def update_source(
     source_path: Path,
     *,
     pages_produced: list[str] | None = None,
+    key: str | None = None,
 ) -> str:
     """Record the current hash of *source_path* in the manifest. Returns the hash.
 
     Edits the manifest in place: matches an existing entry across path forms and
     updates it, otherwise appends a new one — preserving the manifest's shape
     (dict or list), duplicate-path entries, and any skill-written fields.
+
+    The stored key is normalized to the portable form (vault-relative for
+    in-vault sources, ``~``-relative under ``$HOME``) so a synced vault never
+    accumulates machine absolute paths. Pass *key* explicitly for sources that
+    have no filesystem representation in either form — a pseudo-key such as
+    ``repo:github.com/owner/name``, ``url:https://...``, or ``agent:claude/<id>``.
+    When neither applies, the raw path is kept for backward compatibility and a
+    warning is written to stderr, because that entry is not portable across
+    machines.
     """
+    now = datetime.now(timezone.utc).isoformat()
+    explicit_key = key is not None
+    hash_path = source_path
+    if explicit_key:
+        new_key = key
+    else:
+        derived = stored_key(source_path, vault)
+        if derived is None:
+            new_key = str(source_path)
+            print(
+                f"warning: {source_path} is outside the vault and $HOME, so it has no "
+                f"portable key; storing the absolute path. Pass key=<repo:|url:|agent:> "
+                f"to keep the vault portable across machines.",
+                file=sys.stderr,
+            )
+        else:
+            from obsidian_wiki.provenance import prefer_archive_write_path
+            preferred = prefer_archive_write_path(vault, derived)
+            if preferred is not None:
+                new_key = preferred
+                hash_path = vault / preferred
+            else:
+                new_key = derived
+    # Hash outside the lock — hashing a large source tree can take seconds and
+    # nothing else in the manifest depends on it.
+    current_hash = compute_hash(hash_path)
+
+    with manifest_lock(vault):
+        return _update_source_locked(
+            vault, source_path, new_key, explicit_key, current_hash, now, pages_produced,
+        )
+
+
+def _update_source_locked(
+    vault: Path,
+    source_path: Path,
+    new_key: str,
+    explicit_key: bool,
+    current_hash: str,
+    now: str,
+    pages_produced: list[str] | None,
+) -> str:
+    """The manifest read-modify-write half of :func:`update_source`."""
     manifest = _load_raw(vault)
     sources = manifest.get("sources")
-    current_hash = compute_hash(source_path)
-    now = datetime.now(timezone.utc).isoformat()
 
     if isinstance(sources, list):
         target: dict | None = None
@@ -248,8 +562,14 @@ def update_source(
                 target = e
                 break
         if target is None:
-            target = {"path": str(source_path)}
+            target = {"path": new_key}
             sources.append(target)
+        elif target.get("path") != new_key and (
+            explicit_key or _rekey_stale_raw_to_archive(target.get("path"), new_key)
+        ):
+            # Explicit --key is authoritative; otherwise only stale
+            # ``_raw/<name>.md`` keys move onto ``_raw/_archived/…``.
+            target["path"] = new_key
         target["content_hash"] = _format_hash(target.get("content_hash"), current_hash)
         target["last_ingested"] = now
         if pages_produced is not None:
@@ -258,23 +578,49 @@ def update_source(
         if not isinstance(sources, dict):
             sources = {}
         match_key: str | None = None
-        for stored_key in sources:
-            if _same_source(stored_key, source_path, vault):
-                match_key = stored_key
+        for existing_key in sources:
+            if _same_source(existing_key, source_path, vault):
+                match_key = existing_key
                 break
-        key = match_key if match_key is not None else str(source_path)
-        entry = sources.get(key) if isinstance(sources.get(key), dict) else {}
+        if match_key is not None and match_key != new_key and (
+            explicit_key or _rekey_stale_raw_to_archive(match_key, new_key)
+        ):
+            # Explicit key wins; otherwise only stale ``_raw/<name>.md`` keys
+            # move onto ``_raw/_archived/…`` so other portable keys stay put.
+            moved = sources.pop(match_key)
+            existing = sources.get(new_key)
+            if isinstance(existing, dict):
+                moved = {**existing, **moved}
+            sources[new_key] = moved
+            match_key = new_key
+        # A matched legacy entry otherwise keeps its existing key; only new
+        # entries use the portable form, so an in-place update never re-keys a
+        # dict by surprise (migrate handles legacy conversion).
+        manifest_key = match_key if match_key is not None else new_key
+        entry = sources.get(manifest_key) if isinstance(sources.get(manifest_key), dict) else {}
         entry["content_hash"] = _format_hash(entry.get("content_hash"), current_hash)
         entry["last_ingested"] = now
         if pages_produced is not None:
             entry["pages_produced"] = pages_produced
-        sources[key] = entry
+        sources[manifest_key] = entry
 
     manifest["sources"] = sources
-    _manifest_path(vault).write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    _write_manifest(vault, manifest)
     return current_hash
+
+
+def _rekey_stale_raw_to_archive(old_key: str | None, new_key: str) -> bool:
+    if not old_key:
+        return False
+    old = Path(old_key)
+    new = Path(new_key)
+    return (
+        old.parts[:1] == ("_raw",)
+        and "_archived" not in old.parts
+        and len(new.parts) >= 3
+        and new.parts[0] == "_raw"
+        and new.parts[1] == "_archived"
+    )
 
 
 def hash_file(path: Path) -> str:

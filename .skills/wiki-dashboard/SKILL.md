@@ -1,11 +1,7 @@
 ---
 name: wiki-dashboard
 description: >
-  Create dynamic, queryable dashboard views of the Obsidian vault using Obsidian Bases or Dataview.
-  Use this skill when the user says "create a dashboard", "vault dashboard", "show all X as a table",
-  "dynamic view", "query my vault", "build a content index", "show me all concepts/entities/projects",
-  or wants a structured, auto-updating view of their wiki content.
-  Bases is native to Obsidian 1.8+ (no plugin needed). Dataview requires the community plugin.
+  Create dynamic, queryable Obsidian dashboard views using Bases or Dataview. Use for auto-updating tables, indexes, or structured views of vault content; not for ordinary question answering.
 ---
 
 # Wiki Dashboard — Dynamic Vault Views
@@ -14,7 +10,10 @@ Two tools available: **Obsidian Bases** (native, GUI-driven, no plugin) and **Da
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH`.
+**Writing profile:** Before drafting or rewriting natural-language Markdown, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+Apply `WRITING.md` preferences only to optional Markdown dashboard prose; `.base` syntax remains unchanged.
+
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH`.
 2. Read `$OBSIDIAN_VAULT_PATH/index.md` to understand what categories and pages exist.
 3. Ask the user what they want to view if not specified — folder, tag, category, date range?
 4. Ask if they have Dataview installed if you're unsure which tool to use.

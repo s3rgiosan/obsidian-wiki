@@ -1,12 +1,7 @@
 ---
 name: memory-bridge
 description: >
-  Browse and compare wiki knowledge by which AI tool originally produced it. Use this skill when the user
-  says "/memory-bridge", "browse codex memory", "what did codex know about X", "show me claude knowledge",
-  "cross-tool memory", "what does hermes know that claude doesn't", "show me knowledge from <tool>",
-  "compare my AI tool memories", or wants to explore knowledge gaps between tools. Works from any project.
-  Diff mode ("what's different", "unique to codex", "gaps between tools") is the killer feature — it surfaces
-  blind spots between tools that the user may not know exist.
+  Browse or compare wiki knowledge by originating AI tool. Use for cross-tool memory questions, tool-specific knowledge, or gap/diff analysis between Codex, Claude, Hermes, and other agents.
 ---
 
 # Memory Bridge — Cross-Tool Knowledge Browser
@@ -15,7 +10,7 @@ You are helping the user browse and compare their Obsidian wiki knowledge filter
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH`.
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH`.
 2. Read `$OBSIDIAN_VAULT_PATH/.manifest.json` — this is the source-of-truth for what tool produced what.
 3. Read `$OBSIDIAN_VAULT_PATH/index.md` for page titles and one-line descriptions.
 

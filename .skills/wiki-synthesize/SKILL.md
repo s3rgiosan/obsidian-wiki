@@ -1,11 +1,7 @@
 ---
 name: wiki-synthesize
 description: >
-  Systematically discover synthesis opportunities across the Obsidian wiki — pairs or clusters of
-  concepts that co-occur frequently across pages but have no synthesis page connecting them. Creates
-  new synthesis/ pages that draw explicit cross-cutting conclusions. Use when the user says "synthesize
-  my wiki", "find connections", "what concepts keep coming up together", "/wiki-synthesize", or after
-  a large ingest when the vault has grown significantly.
+  Find recurring concept combinations across the wiki that lack an explicit synthesis page, then create cross-cutting synthesis pages. Use for knowledge synthesis after the vault has accumulated enough material.
 ---
 
 # Wiki Synthesize — First-Class Synthesis Discovery
@@ -14,7 +10,10 @@ You are scanning the wiki for concepts that co-occur across many pages but have 
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_LINK_FORMAT` (default: `wikilink`).
+**Writing profile:** Before drafting or rewriting natural-language Markdown, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+`WRITING.md` preferences apply only to newly drafted or rewritten natural-language Markdown; preserve source content and structured records.
+
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_LINK_FORMAT` (default: `wikilink`).
 2. Read `index.md` to get the full page inventory.
 3. Read `hot.md` if it exists — it surfaces recent activity and active threads that may already point to synthesis opportunities.
 4. Read `_meta/taxonomy.md` to understand the tag vocabulary.
@@ -147,14 +146,20 @@ Skipped (consider next time):
 
 ## Step 7: Update Special Files
 
-**`index.md`** — Add entries for all new synthesis pages.
+One locked call updates the index, the log, and the hot cache:
 
-**`log.md`** — Append:
-```
-- [TIMESTAMP] WIKI_SYNTHESIZE pages_scanned=N synthesis_created=M candidates_skipped=K
+```bash
+obsidian-wiki memory sync WIKI_SYNTHESIZE \
+  pages_scanned=<N> synthesis_created=<M> candidates_skipped=<K> \
+  --takeaways "Synthesized 5 cross-cutting pages: Caching × Consistency, Testing × Observability, …"
 ```
 
-**`hot.md`** — Read `$OBSIDIAN_VAULT_PATH/hot.md` (create from the template in `wiki-ingest` if missing). Update **Recent Activity** with what was synthesized — e.g. "Synthesized 5 cross-cutting pages: Caching × Consistency, Testing × Observability, …". Update **Active Threads** with any open questions the synthesis surfaced. Update `updated` timestamp.
+Open questions the synthesis surfaced are threads, not takeaways — record each one:
+`obsidian-wiki memory todo add "<question>" --origin synthesis/<page>.md`.
+
+Never hand-edit `index.md`, `log.md`, or `hot.md` — the command takes the lock that keeps a parallel writer from dropping your update.
+
+See `.skills/llm-wiki/references/MEMORY.md` for the full procedure.
 
 ## Quality Checklist
 

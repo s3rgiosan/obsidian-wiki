@@ -1,12 +1,7 @@
 ---
 name: wiki-digest
 description: >
-  Generate a periodic knowledge digest — a human-readable newsletter-style summary of what was
-  learned, updated, and connected in your wiki over a specified period (day/week/month). Use when
-  the user says "what did I learn this week", "give me a digest", "weekly summary", "knowledge
-  report", "what's new in my wiki", "/wiki-digest [period]", "summarize my recent learning", or
-  wants a readable overview of recent wiki activity. Distinct from wiki-status (which reports
-  ingestion delta of sources) — wiki-digest summarizes *knowledge*, not sources.
+  Produce a day/week/month knowledge digest summarizing what was learned, updated, and connected in the wiki. Use for readable recent-learning summaries; wiki-status reports source and ingestion state instead.
 ---
 
 # Wiki Digest — Knowledge Newsletter Generator
@@ -15,7 +10,10 @@ You are generating a human-readable digest of recent wiki activity: what was lea
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_LINK_FORMAT`.
+**Writing profile:** Before drafting or rewriting natural-language Markdown, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+`WRITING.md` preferences apply only to newly drafted or rewritten natural-language Markdown; preserve source content and structured records.
+
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_LINK_FORMAT`.
 2. **Parse the period** from the user's request:
    - "daily" / "today" / "yesterday" → last 24 hours
    - "weekly" / "this week" / no argument (default) → last 7 days

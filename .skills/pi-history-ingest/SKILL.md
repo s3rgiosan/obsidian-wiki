@@ -1,11 +1,7 @@
 ---
 name: pi-history-ingest
 description: >
-  Ingest Pi coding agent session history into the Obsidian wiki. Use this skill when the user wants to mine
-  their past Pi sessions for knowledge, import their ~/.pi/agent/sessions folder, extract insights from
-  previous coding sessions, or says things like "process my Pi history", "add my Pi sessions to the wiki",
-  "ingest ~/.pi", or "what have I worked on in Pi". Also triggers when the user mentions Pi sessions,
-  Pi agent history, ~/.pi/agent/sessions, or Pi conversation logs.
+  Ingest Pi coding-agent session history into Obsidian as distilled knowledge. Use for importing or mining ~/.pi/agent/sessions or Pi conversation logs; use wiki-agent for targeted topic-only recall.
 ---
 
 # Pi History Ingest — Session Mining
@@ -18,7 +14,10 @@ This skill can be invoked directly or via the `wiki-history-ingest` router (`/wi
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `PI_HISTORY_PATH` (defaults to `~/.pi/agent/sessions`)
+**Writing profile:** Before drafting or rewriting natural-language Markdown, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+`WRITING.md` preferences apply only to newly drafted or rewritten natural-language Markdown; preserve source content and structured records.
+
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `PI_HISTORY_PATH` (defaults to `~/.pi/agent/sessions`)
 2. Read `.manifest.json` at the vault root to check what has already been ingested
 3. Read `index.md` at the vault root to understand what the wiki already contains
 
@@ -254,13 +253,19 @@ Add/update a top-level summary block:
 
 ### Update special files
 
-Update `index.md` and `log.md`:
+Update `index.md`, `log.md`, and `hot.md` with one locked call:
 
-```
-- [TIMESTAMP] PI_HISTORY_INGEST sessions=N pages_updated=X pages_created=Y mode=append|full
+```bash
+obsidian-wiki memory sync PI_HISTORY_INGEST \
+  sessions=<sessions> pages_updated=<pages_updated> \
+  pages_created=<pages_created> mode=<mode> \
+  --takeaways "Ingested 12 Pi sessions across 3 projects; surfaced patterns in CLI tooling and API design."
 ```
 
-**`hot.md`** — Read `$OBSIDIAN_VAULT_PATH/hot.md` (create from the template in `wiki-ingest` if missing). Update **Recent Activity** with a one-line summary — e.g. "Ingested 12 Pi sessions across 3 projects; surfaced patterns in CLI tooling and API design." Keep the last 3 operations. Update `updated` timestamp.
+Never hand-edit `index.md`, `log.md`, or `hot.md` — the command takes the lock that keeps a parallel writer from dropping your update. `--takeaways` is the one-line conceptual summary that used to go in Recent Activity;
+omit it to leave the previous takeaways untouched.
+
+See `.skills/llm-wiki/references/MEMORY.md` for the full procedure.
 
 ## Privacy and Compliance
 

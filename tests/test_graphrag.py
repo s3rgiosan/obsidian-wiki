@@ -1,4 +1,7 @@
 """Tests for the GraphRAG query index module."""
+
+from __future__ import annotations
+
 import json
 import subprocess
 import sys
@@ -240,6 +243,33 @@ class TestClassifyQuery:
         assert "the" not in terms
         assert "is" not in terms
 
+    def test_gap_query_strips_trailing_punctuation(self):
+        # A trailing "?" used to survive on the gap path, leaving a term like
+        # "mise?" that can never match a title, tag or summary.
+        _, terms = classify_query("What don't I know about mise?")
+        assert terms == ["mise"]
+
+    def test_only_the_negated_form_is_a_gap_question(self):
+        # "what do I know about X" is the plain lookup the wiki-query skill
+        # documents; it used to fall down the gap branch.
+        for q in ("What don't I know about mise?", "What do I not know about mise?",
+                  "what gaps are there?", "what's missing?"):
+            assert classify_query(q)[0] == "gap", q
+        for q in ("What do I know about mise?", "what do I know about attention"):
+            assert classify_query(q)[0] == "direct", q
+
+    def test_list_query_strips_trailing_punctuation(self):
+        _, terms = classify_query("List all pages about transformers?")
+        assert "transformers" in terms
+        assert not any(t.endswith("?") for t in terms)
+
+    def test_gap_and_direct_agree_on_punctuation(self):
+        # Both paths must yield the same term for the same subject.
+        _, gap_terms = classify_query("What do I know about transformers?")
+        _, direct_terms = classify_query("What is transformers?")
+        assert "transformers" in gap_terms
+        assert "transformers" in direct_terms
+
 
 # ---------------------------------------------------------------------------
 # query (integration)
@@ -279,6 +309,22 @@ class TestQuery:
         result = query(simple_vault, "deep learning")
         json.dumps(result)
 
+    def test_non_english_question_about_absent_topic_returns_no_candidates(self, simple_vault):
+        # Regression for #191: short German function words ("ich", "über")
+        # used to substring-match inside unrelated title words ("Architektur"),
+        # scoring a page unrelated to the actual topic and flagging it
+        # index_only — telling the agent it can answer without reading a page.
+        result = query(simple_vault, "Was weiß ich über Kubernetes?")
+        assert result["candidates"] == []
+        assert result["index_only"] is False
+
+    def test_mid_word_substring_does_not_match_title(self, simple_vault):
+        idx = build_index(simple_vault)
+        # "bed" sits mid-word inside "embedding" (em-BED-ding), not at a word
+        # boundary. A bare substring check used to score this a title hit.
+        result = rank_candidates(idx, ["bed"])
+        assert result == []
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -305,3 +351,116 @@ class TestGraphQueryCLI:
     def test_missing_vault_exits_nonzero(self, tmp_path):
         proc = self._run("graph-query", str(tmp_path / "nope"), "anything")
         assert proc.returncode != 0
+
+
+# ---------------------------------------------------------------------------
+# Unified graph layer — bookkeeping files must not pollute the query graph
+# ---------------------------------------------------------------------------
+
+class TestBookkeepingExcluded:
+    def test_index_log_hot_not_indexed(self, simple_vault):
+        for name in ("index", "log", "hot", "_insights"):
+            (simple_vault / f"{name}.md").write_text(
+                "---\ntitle: %s\n---\n" % name
+                + "\n".join(f"[[{p}]]" for p in ("transformer", "attention", "embedding", "python"))
+            )
+        idx = build_index(simple_vault)
+        assert {"index", "log", "hot", "_insights"}.isdisjoint(idx)
+
+    def test_path_does_not_route_through_index(self, simple_vault):
+        """index.md links to everything; a path through it is meaningless."""
+        (simple_vault / "index.md").write_text(
+            "---\ntitle: Index\n---\n[[python]]\n[[embedding]]\n"
+        )
+        idx = build_index(simple_vault)
+        path = find_path(idx, "python", "embedding")
+        # python and embedding are genuinely disconnected without the index hub
+        assert path is None or "index" not in path
+
+    def test_real_path_still_found(self, simple_vault):
+        idx = build_index(simple_vault)
+        assert find_path(idx, "attention", "embedding") == ["attention", "transformer", "embedding"]
+
+    def test_max_depth_respected(self, simple_vault):
+        idx = build_index(simple_vault)
+        assert find_path(idx, "attention", "embedding", max_depth=1) is None
+
+
+# ---------------------------------------------------------------------------
+# Structural intents
+# ---------------------------------------------------------------------------
+
+class TestStructuralClassification:
+    @pytest.mark.parametrize("q,expected", [
+        ("what breaks if I delete transformer", "impact"),
+        ("what depends on transformer", "impact"),
+        ("what links to attention", "impact"),
+        ("blast radius of transformer", "impact"),
+        ("which pages bridge my clusters", "bridges"),
+        ("what would fragment my vault", "bridges"),
+        ("what's central in my vault", "hubs"),
+        ("show me the top hubs", "hubs"),
+        ("what are my main topics", "hubs"),
+        ("what clusters do I have", "clusters"),
+        ("how is my wiki organised", "clusters"),
+        ("show me surprising connections", "surprising"),
+        ("any unexpected links?", "surprising"),
+    ])
+    def test_intent_detected(self, q, expected):
+        assert classify_query(q)[0] == expected
+
+    @pytest.mark.parametrize("q,expected", [
+        ("how is transformer connected to embedding", "path"),
+        ("what connects transformer and embedding", "path"),
+        ("list all pages about nlp", "list"),
+        ("what don't I know about attention", "gap"),
+        ("what do I know about attention", "direct"),   # plain lookup, not a gap
+        ("attention mechanism", "direct"),
+    ])
+    def test_existing_intents_unchanged(self, q, expected):
+        assert classify_query(q)[0] == expected
+
+
+class TestStructuralAnswers:
+    def test_impact_lists_dependents(self, simple_vault):
+        r = query(simple_vault, "what breaks if I delete transformer")
+        g = r["graph"]
+        assert r["answer_type"] == "impact" and r["index_only"] is True
+        assert g["seed"] == "transformer"
+        assert "attention" in g["direct_dependents"]
+
+    def test_impact_unresolvable_falls_back(self, simple_vault):
+        r = query(simple_vault, "what breaks if I delete zzz-nonexistent-qqq")
+        assert r["answer_type"] == "direct"
+        assert r["graph"] is None
+
+    def test_hubs_ranked_by_degree(self, simple_vault):
+        g = query(simple_vault, "what's central in my vault")["graph"]
+        assert g["hubs"][0]["page"] == "transformer"
+        assert "title" in g["hubs"][0]
+
+    def test_bridges_have_betweenness(self, simple_vault):
+        g = query(simple_vault, "which pages bridge my clusters")["graph"]
+        assert all("betweenness" in b for b in g["bridges"])
+
+    def test_clusters_have_cohesion(self, simple_vault):
+        g = query(simple_vault, "what clusters do I have")["graph"]
+        assert g["clusters"]
+        for c in g["clusters"]:
+            assert 0.0 <= c["cohesion"] <= 1.0
+            assert isinstance(c["fragmented"], bool)
+
+    def test_surprising_returns_list(self, simple_vault):
+        g = query(simple_vault, "show me surprising connections")["graph"]
+        assert isinstance(g["connections"], list)
+
+    def test_non_structural_query_has_no_graph_payload(self, simple_vault):
+        assert query(simple_vault, "attention mechanism")["graph"] is None
+        assert query(simple_vault, "what don't I know about attention")["graph"] is None
+
+    def test_structural_queries_need_no_page_reads(self, simple_vault):
+        for q in ("what's central in my vault", "what clusters do I have",
+                  "which pages bridge my clusters", "show me surprising connections"):
+            r = query(simple_vault, q)
+            assert r["index_only"] is True, q
+            assert r["should_read"] == [], q

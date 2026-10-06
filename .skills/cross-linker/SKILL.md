@@ -1,13 +1,7 @@
 ---
 name: cross-linker
 description: >
-  Scan the Obsidian wiki and automatically discover missing cross-references between pages.
-  Use this skill when the user says "link my pages", "find missing links", "cross-reference",
-  "connect my wiki", "add wikilinks", "what pages should be linked", or after any large ingestion
-  to ensure new pages are woven into the existing knowledge graph. Also trigger when the user
-  mentions "orphan pages" in the context of wanting to connect them, or says things like
-  "my wiki feels disconnected" or "pages aren't linked well". This is a write-heavy skill —
-  it actually modifies pages to add links, unlike wiki-lint which just reports issues.
+  Find and add missing cross-references between wiki pages. Use when pages are disconnected or after large ingestion. This modifies pages to add links; use wiki-lint for report-oriented structural auditing.
 ---
 
 # Cross-Linker — Automated Wiki Cross-Referencing
@@ -18,7 +12,10 @@ You are weaving the wiki's knowledge graph tighter by finding and inserting miss
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_LINK_FORMAT` (default: `wikilink`).
+**Writing profile:** Before drafting or rewriting natural-language Markdown, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+`WRITING.md` preferences apply only to newly drafted or rewritten natural-language Markdown; preserve source content and structured records.
+
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_LINK_FORMAT` (default: `wikilink`).
 2. Read `index.md` to get the full inventory of pages and their one-line descriptions
 3. Skim `log.md` to see what was recently ingested (focus linking effort on new pages)
 
@@ -255,12 +252,19 @@ To promote: move the page to `projects/<project-name>/references/` and update al
 
 ## Step 7: Update Log and Hot Cache
 
-Append to `log.md`:
-```
-- [TIMESTAMP] CROSS_LINK pages_scanned=N links_added=M typed_relations_written=T pages_modified=P orphans_remaining=Q misc_affinity_updated=R promotion_candidates=S
+One locked call updates the log and the hot cache (the index is unaffected — no pages were created):
+
+```bash
+obsidian-wiki memory sync CROSS_LINK \
+  pages_scanned=<N> links_added=<M> typed_relations_written=<T> \
+  pages_modified=<P> orphans_remaining=<Q> \
+  misc_affinity_updated=<R> promotion_candidates=<S> \
+  --takeaways "Cross-linked 23 mentions across 12 pages; 2 orphans remain."
 ```
 
-**`hot.md`** — Read `$OBSIDIAN_VAULT_PATH/hot.md` (create from the template in `wiki-ingest` if missing). Update **Recent Activity** with a one-line summary of what was linked — e.g. "Cross-linked 23 mentions across 12 pages; 2 orphans remain." Keep the last 3 operations. Update `updated` timestamp.
+Never hand-edit `index.md`, `log.md`, or `hot.md` — the command takes the lock that keeps a parallel writer from dropping your update.
+
+See `.skills/llm-wiki/references/MEMORY.md` for the full procedure.
 
 ## Tips
 

@@ -6,7 +6,7 @@ This project is a **skill-based framework** for building and maintaining an Obsi
 
 - **Purpose:** Build and maintain an Obsidian wiki using the LLM Wiki pattern (Andrej Karpathy).
 - **Tech Stack:** Markdown only. No code, no dependencies. The AI agent IS the runtime.
-- **Key Config:** Resolve config via `AGENTS.md`: inline `@name` vault override first, then `.env`, then `~/.obsidian-wiki/config`. The resolved config supplies `OBSIDIAN_VAULT_PATH`.
+- **Key Config:** Resolve config via `AGENTS.md`: inline `@name` vault override first, then `.env`, then the global config (`~/.config/obsidian-wiki/config`, XDG-style; legacy `~/.obsidian-wiki/config` still honored). The resolved config supplies `OBSIDIAN_VAULT_PATH`.
 - **Skills:** `.skills/` contains skill folders, each with a `SKILL.md` defining a workflow.
 
 ## Key Concepts
@@ -23,7 +23,7 @@ This project is a **skill-based framework** for building and maintaining an Obsi
 |---|---|---|
 | Setup | `.skills/wiki-setup/` | Initialize vault structure |
 | Ingest | `.skills/wiki-ingest/` | Distill documents into wiki pages, plus any text data — chat exports, logs, transcripts |
-| History Router | `.skills/wiki-history-ingest/` | Route `/wiki-history-ingest <claude|codex>` to the right history skill |
+| History Router | `.skills/wiki-history-ingest/` | Route `/wiki-history-ingest <claude|copilot|codex|hermes|openclaw|pi>` to the right history skill |
 | Claude History | `.skills/claude-history-ingest/` | Mine `~/.claude` conversations |
 | Codex History | `.skills/codex-history-ingest/` | Mine `~/.codex` sessions and rollout logs |
 | Status | `.skills/wiki-status/` | Audit ingestion state and delta |

@@ -1,13 +1,7 @@
 ---
 name: graph-colorize
 description: >
-  Color-code the Obsidian graph view by rewriting `.obsidian/graph.json` colorGroups.
-  Use this skill when the user says "color my graph", "color code obsidian", "colorize
-  the graph", "color the graph by tag", "color by category", "highlight visibility
-  in graph", "make the graph colorful", "distinguish tags in graph", or wants nodes
-  in Obsidian's graph view tinted by tag, folder, or visibility. Generates a
-  `colorGroups` array from the vault's actual tags/categories and merges it into the
-  existing graph.json without clobbering other graph settings. Always backs up first.
+  Configure Obsidian graph colors by tag, folder, category, or visibility by updating .obsidian/graph.json. Use for graph colorization; preserve other graph settings and back up before changes.
 ---
 
 # Graph Colorize — Color-code the Obsidian Graph View
@@ -18,7 +12,7 @@ Obsidian stores graph settings in `<vault>/.obsidian/graph.json`. The `colorGrou
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH`.
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH`.
 2. Confirm `$OBSIDIAN_VAULT_PATH/.obsidian/` exists. If it doesn't, the vault has never been opened in Obsidian — tell the user to open the vault once in Obsidian, then re-run.
 3. **Warn the user if Obsidian is likely open**: Obsidian overwrites `graph.json` on close. Tell them to close the vault first, or be ready to reload (Cmd/Ctrl+R) and not touch the graph settings until they reload.
 

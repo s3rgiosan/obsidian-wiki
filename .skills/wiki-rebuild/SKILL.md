@@ -1,11 +1,7 @@
 ---
 name: wiki-rebuild
 description: >
-  Archive existing wiki knowledge and rebuild from scratch, or restore from a previous archive.
-  Use this skill when the user wants to start fresh, rebuild the wiki from all sources, archive current
-  knowledge before a major change, or restore an older version. Triggers on "rebuild the wiki",
-  "start over", "archive and rebuild", "restore from archive", "nuke and repave", "clean rebuild".
-  Also use when the wiki has drifted too far from sources and incremental fixes won't cut it.
+  Archive and rebuild wiki knowledge from source, or restore a prior archive. Use for full restart/recovery when incremental repair is inappropriate; this is broader and more destructive than ordinary update or lint.
 ---
 
 # Wiki Rebuild — Archive, Rebuild, Restore
@@ -14,7 +10,7 @@ You are performing a destructive operation on the wiki. Always archive first, al
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and optional QMD settings such as `QMD_WIKI_COLLECTION`
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and optional QMD settings such as `QMD_WIKI_COLLECTION`
 2. Read `.manifest.json` to understand current state
 3. **Confirm the user's intent.** This skill supports three modes:
    - **Archive only** — snapshot current wiki, no rebuild
@@ -56,7 +52,7 @@ $OBSIDIAN_VAULT_PATH/
   "total_pages": 87,
   "total_sources": 42,
   "total_projects": 6,
-  "vault_path": "/Users/name/Knowledge",
+  "vault_path": "$OBSIDIAN_VAULT_PATH",
   "manifest_snapshot": ".manifest.json"
 }
 ```

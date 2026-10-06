@@ -60,9 +60,9 @@ def test_all_bootstraps_route_context_pack() -> None:
         assert "wiki-context-pack" in read(relative), relative
 
 
-def test_readmes_document_agent_context_contract() -> None:
-    english = read("README.md")
-    chinese = read("README_TW.md")
+def test_cli_docs_document_agent_context_contract() -> None:
+    english = read("docs/cli.md")
+    chinese = read("docs/cli.zh-TW.md")
 
     for text in (english, chinese):
         assert "obsidian-wiki context-pack" in text

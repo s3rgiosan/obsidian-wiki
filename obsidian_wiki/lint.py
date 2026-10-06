@@ -4,12 +4,36 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
-from obsidian_wiki.trust import TRUST_LEDGER_RELATIVE_PATH, check_trust_ledger
+from obsidian_wiki.cache import _iter_entries, _load_manifest
+from obsidian_wiki.graph_analysis import _page_slug as graph_page_slug
+from obsidian_wiki.graph_analysis import iter_pages as iter_graph_pages
+from obsidian_wiki.provenance import (
+    archive_wikilink_relpath,
+    clip_url_index,
+    expected_snapshots_for_page,
+    invert_pages,
+    parse_snapshots_field,
+)
+from obsidian_wiki.vault import SKIP_DIRS as VAULT_SKIP_DIRS
+from obsidian_wiki.vault import iter_md, split_frontmatter
+from obsidian_wiki.temporal import (
+    SUPERSEDED_FIELD,
+    superseded_target,
+    validity_window,
+)
+from obsidian_wiki.trust import (
+    ALLOWED_LIFECYCLES,
+    TRUST_LEDGER_RELATIVE_PATH,
+    check_lifecycle_transitions,
+    check_trust_ledger,
+    validate_trust_metadata,
+)
 
-SKIP_DIRS = frozenset("_raw _archived _staging _archives _bootstrap .obsidian .git".split())
+SKIP_DIRS = VAULT_SKIP_DIRS | {"_bootstrap"}
 REQUIRED_FRONTMATTER = (
     "title",
     "category",
@@ -32,26 +56,77 @@ ALLOWED_RELATIONSHIP_TYPES = frozenset(
     {"extends", "implements", "contradicts", "derived_from", "uses", "replaces", "related_to"}
 )
 
-_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---", re.DOTALL)
 _FIELD_RE = re.compile(r"^([A-Za-z_][\w-]*):", re.MULTILINE)
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:[|#][^\]]*?)?\]\]")
-_MD_LINK_RE = re.compile(r"\[.*?\]\(([^)]+\.md[^)]*)\)")
+# Local `.md` targets only: skip URLs (any `scheme:`) and require `.md` to end
+# the path, before an optional `#anchor` or `"title"`.
+_MD_LINK_RE = re.compile(
+    r"\[.*?\]\((?![A-Za-z][A-Za-z0-9+.-]*:)([^)#\s]+\.md)(?:[#\s][^)]*)?\)"
+)
 _RELATIONSHIP_LIST_FIELD_RE = re.compile(
     r"^\s*-\s*(type|target):\s*(.*?)\s*$"
 )
 _RELATIONSHIP_ITEM_START_RE = re.compile(r"^\s*-\s*(?:#.*)?$")
 _RELATIONSHIP_FIELD_RE = re.compile(r"^\s+(type|target):\s*(.*?)\s*$")
+_WINDOWS_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _frontmatter_field_block(frontmatter: str, field: str) -> str:
+    """The raw value of a frontmatter *field*, including a following block list.
+
+    Returns the inline value plus any subsequent ``- item`` lines indented under
+    it; an empty string when the field is absent.
+    """
+    lines = frontmatter.splitlines()
+    for index, line in enumerate(lines):
+        match = re.match(rf"^{re.escape(field)}\s*:(.*)$", line)
+        if not match:
+            continue
+        block = [match.group(1)]
+        for following in lines[index + 1:]:
+            if re.match(r"^\s+-\s", following) or not following.strip():
+                block.append(following)
+                continue
+            break
+        return "\n".join(block)
+    return ""
+
+
+def _absolute_source_entries(frontmatter: str) -> list[str]:
+    """`sources:` entries that are machine absolute paths (contract violation).
+
+    The source key contract bans a stored absolute path in page frontmatter just
+    as it does in the manifest; ``~``-relative and vault-relative entries are
+    fine. Only the ``sources:`` field is inspected — a path in prose may be a
+    legitimate citation.
+    """
+    raw = _frontmatter_field_block(frontmatter, "sources")
+    if not raw.strip():
+        return []
+    lines = raw.splitlines()
+    inline = lines[0].strip()
+    entries: list[str] = []
+    if inline.startswith("["):
+        entries.extend(inline.strip("[]").split(","))
+    elif inline:
+        # A scalar `sources: <value>` is a single entry — not a block list, and
+        # not a flow list, but still a stored source key.
+        entries.append(inline)
+    entries.extend(
+        line.strip()[1:] for line in lines[1:] if line.strip().startswith("-")
+    )
+    bad: list[str] = []
+    for entry in entries:
+        value = entry.strip().strip("'\"").strip()
+        if not value:
+            continue
+        if value.startswith("/") or _WINDOWS_ABS_RE.match(value):
+            bad.append(value)
+    return bad
 
 
 def _slug(text: str) -> str:
     return text.strip().lower().replace(" ", "-")
-
-
-def _iter_pages(vault: Path) -> list[Path]:
-    return [
-        path for path in vault.rglob("*.md")
-        if not any(part in SKIP_DIRS for part in path.relative_to(vault).parts)
-    ]
 
 
 def _parse_frontmatter_values(frontmatter: str) -> dict[str, str]:
@@ -145,20 +220,58 @@ def _normalise_node_id(raw: str) -> str:
     return "/".join(_slug(part) for part in target.strip("/").split("/") if part)
 
 
+# Extensions Obsidian embeds as attachments. Anything else after a dot is part
+# of the page name ("Node.js", "v1.2 release notes"), not a file extension.
+_ATTACHMENT_SUFFIXES = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".webp", ".avif",
+    ".mp3", ".wav", ".m4a", ".ogg", ".flac", ".mp4", ".webm", ".mov", ".ogv",
+    ".pdf", ".canvas", ".base",
+})
+
+
+def _wikilink_page_target(raw: str) -> str | None:
+    """Normalise a `_WIKILINK_RE` capture to a page name, or None for an
+    attachment embed `by_slug` (`.md`-only) can never hold. Also strips an
+    explicit `.md` suffix and a table-escaped pipe's trailing backslash.
+    """
+    name = raw.rstrip("\\").split("/")[-1]
+    suffix = Path(name).suffix.lower()
+    if suffix == ".md":
+        return name[: -len(suffix)]
+    if suffix in _ATTACHMENT_SUFFIXES:
+        return None
+    return name
+
+
 def _parse_page(path: Path, vault: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8", errors="replace")
-    front_match = _FRONTMATTER_RE.match(text)
-    frontmatter = front_match.group(1) if front_match else ""
+    frontmatter = split_frontmatter(text)[0]
     fields = set(_FIELD_RE.findall(frontmatter))
     values = _parse_frontmatter_values(frontmatter)
     relative = path.relative_to(vault)
 
     links: list[str] = []
+    broken_archive_links: list[dict[str, str]] = []
     for raw in _WIKILINK_RE.findall(text):
-        target = _slug(raw.split("/")[-1])
+        archive_rel = archive_wikilink_relpath(vault, raw)
+        if archive_rel is not None:
+            if not (vault / archive_rel).is_file():
+                broken_archive_links.append(
+                    {"page": relative.as_posix(), "target": archive_rel}
+                )
+            continue
+        name = _wikilink_page_target(raw)
+        target = _slug(name) if name else ""
         if target:
             links.append(target)
     for href in _MD_LINK_RE.findall(text):
+        archive_rel = archive_wikilink_relpath(vault, href)
+        if archive_rel is not None:
+            if not (vault / archive_rel).is_file():
+                broken_archive_links.append(
+                    {"page": relative.as_posix(), "target": archive_rel}
+                )
+            continue
         target = _slug(Path(href).stem)
         if target:
             links.append(target)
@@ -172,6 +285,10 @@ def _parse_page(path: Path, vault: Path) -> dict[str, Any]:
         "fields": fields,
         "links": links,
         "relationships": _parse_relationships(frontmatter),
+        "absolute_sources": _absolute_source_entries(frontmatter),
+        "snapshots": parse_snapshots_field(_frontmatter_field_block(frontmatter, "snapshots")),
+        "values": values,
+        "archive_broken": broken_archive_links,
     }
 
 
@@ -180,8 +297,25 @@ def lint_vault(
     *,
     require_trust_ledger: bool = True,
     strict_trust: bool = False,
+    allowed_relationship_types: Collection[str] | None = None,
+    allowed_lifecycles: Collection[str] | None = None,
+    required_trust_fields: Collection[str] | None = None,
+    schema_source: str = "framework-defaults",
 ) -> dict[str, Any]:
-    pages = [_parse_page(path, vault) for path in _iter_pages(vault)]
+    relationship_types = frozenset(
+        ALLOWED_RELATIONSHIP_TYPES
+        if allowed_relationship_types is None
+        else allowed_relationship_types
+    )
+    lifecycles = frozenset(
+        ALLOWED_LIFECYCLES if allowed_lifecycles is None else allowed_lifecycles
+    )
+    trust_fields = (
+        tuple(required_trust_fields)
+        if required_trust_fields is not None
+        else TRUST_REQUIRED_FRONTMATTER
+    )
+    pages = [_parse_page(path, vault) for path in iter_md(vault, SKIP_DIRS)]
     slug_index: dict[str, list[dict[str, Any]]] = defaultdict(list)
     node_index: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for page in pages:
@@ -199,18 +333,45 @@ def lint_vault(
                 broken_links.append({"page": page["path"], "target": target})
                 continue
             incoming[target] += 1
+        broken_links.extend(page.get("archive_broken", []))
 
     missing_frontmatter = []
     confidence_missing_fields = []
+    trust_metadata_errors = []
     for page in pages:
         if page["slug"] in RESERVED_PAGE_STEMS:
             continue
         missing = [field for field in REQUIRED_FRONTMATTER if field not in page["fields"]]
         if missing:
             missing_frontmatter.append({"page": page["path"], "missing": missing})
-        missing_trust = [field for field in TRUST_REQUIRED_FRONTMATTER if field not in page["fields"]]
+        missing_trust = [field for field in trust_fields if field not in page["fields"]]
         if missing_trust:
             confidence_missing_fields.append({"page": page["path"], "missing": missing_trust})
+        try:
+            validate_trust_metadata(
+                vault / page["path"],
+                allowed_lifecycles=lifecycles,
+                required_trust_keys=(),
+            )
+        except ValueError as exc:
+            trust_metadata_errors.append({"page": page["path"], "issue": str(exc)})
+
+    # `graph_analysis` identifies a page by its slugged stem (`_page_slug`), so
+    # two pages with the same slugged stem are ONE node in the graph metrics:
+    # degree, communities, betweenness, and the `neighborhood` blast radius.
+    # `Vector Search.md` and `vector-search.md` collide, in one folder or two.
+    # Key this check with that module's own slug and page selection, borrowed
+    # rather than reimplemented, so the report keys as the merge does.
+    stem_index: dict[str, list[str]] = defaultdict(list)
+    for graph_page in iter_graph_pages(vault):
+        stem_index[graph_page_slug(graph_page, vault)].append(
+            graph_page.relative_to(vault).as_posix()
+        )
+    duplicate_stems = [
+        {"stem": stem, "pages": sorted(paths)}
+        for stem, paths in sorted(stem_index.items())
+        if len(paths) > 1
+    ]
 
     title_index: dict[str, list[str]] = defaultdict(list)
     for page in pages:
@@ -229,6 +390,16 @@ def lint_vault(
         and ("summary" not in page["fields"] or not page["summary"])
     ]
 
+    # Legacy provenance: a `sources:` entry holding a machine absolute path cannot
+    # resolve on another machine, so a synced vault loses the trail. Read-only —
+    # migration of page frontmatter is a separate, deliberate pass (see
+    # docs/cli.md → Source keys and legacy migration).
+    machine_path_sources = [
+        {"page": page["path"], "sources": page["absolute_sources"]}
+        for page in pages
+        if page["slug"] not in RESERVED_PAGE_STEMS and page["absolute_sources"]
+    ]
+
     orphan_pages = []
     for page in pages:
         if page["slug"] in RESERVED_PAGE_STEMS:
@@ -236,6 +407,36 @@ def lint_vault(
         outgoing = sum(1 for target in page["links"] if target in by_slug and target != page["slug"])
         if outgoing == 0 and incoming.get(page["slug"], 0) == 0:
             orphan_pages.append(page["path"])
+
+    manifest_sources = _load_manifest(vault)
+    inverted = invert_pages(manifest_sources)
+    need_urls = any(
+        (key or "").startswith("url:") for key, _ in _iter_entries(manifest_sources)
+    )
+    url_index = clip_url_index(vault) if need_urls else None
+    snapshot_mismatch = []
+    for page in pages:
+        if page["slug"] in RESERVED_PAGE_STEMS:
+            continue
+        expected = expected_snapshots_for_page(
+            vault,
+            page["path"],
+            manifest_sources,
+            inverted=inverted,
+            url_index=url_index,
+        )
+        if not expected:
+            continue
+        actual = page["snapshots"]
+        if set(expected) != set(actual):
+            snapshot_mismatch.append(
+                {
+                    "page": page["path"],
+                    "expected": sorted(expected),
+                    "actual": sorted(actual),
+                }
+            )
+    snapshot_mismatch.sort(key=lambda item: item["page"])
 
     typed_relationship_issues: list[dict[str, Any]] = []
     for page in pages:
@@ -251,7 +452,7 @@ def lint_vault(
                 continue
             relation_type = relationship.get("type", "")
             target_raw = relationship.get("target", "")
-            if relation_type not in ALLOWED_RELATIONSHIP_TYPES:
+            if relation_type not in relationship_types:
                 typed_relationship_issues.append(
                     {
                         "page": page["path"],
@@ -293,25 +494,78 @@ def lint_vault(
                     }
                 )
 
+    # Event-time validity (obsidian_wiki.temporal). Malformed dates fail: a
+    # page whose window can't be parsed is silently treated as current by
+    # retrieval, so an unreported typo means a stale claim answers as fact.
+    # A dangling `superseded_by` only warns — the pointer is advisory, and the
+    # broken_links check already covers the wikilink if the body carries one.
+    temporal_errors: list[dict[str, str]] = []
+    superseded_dangling: list[dict[str, str]] = []
+    for page in pages:
+        try:
+            validity_window(page["values"])
+        except ValueError as exc:
+            temporal_errors.append({"page": page["path"], "issue": str(exc)})
+        raw_successor = page["values"].get(SUPERSEDED_FIELD, "")
+        if not raw_successor:
+            continue
+        successor = _slug(superseded_target(raw_successor))
+        if not successor:
+            temporal_errors.append(
+                {"page": page["path"], "issue": f"empty {SUPERSEDED_FIELD} value"}
+            )
+        elif successor == page["slug"]:
+            superseded_dangling.append(
+                {"page": page["path"], "target": successor, "issue": "self_reference"}
+            )
+        elif successor not in by_slug:
+            superseded_dangling.append(
+                {"page": page["path"], "target": successor, "issue": "missing_target"}
+            )
+
     ledger_path = vault / TRUST_LEDGER_RELATIVE_PATH
     trust_report = (
-        check_trust_ledger(vault, ledger_path)
+        check_trust_ledger(
+            vault,
+            ledger_path,
+            allowed_lifecycles=lifecycles,
+            required_trust_keys=trust_fields,
+            schema_source=schema_source,
+        )
         if ledger_path.is_file() or require_trust_ledger
         else None
+    )
+    illegal_lifecycle_transitions = (
+        check_lifecycle_transitions(
+            vault,
+            ledger_path,
+            allowed_lifecycles=lifecycles,
+            required_trust_keys=trust_fields,
+        )
+        if ledger_path.is_file()
+        else []
     )
 
     findings = {
         "broken_links": broken_links,
         "missing_frontmatter": missing_frontmatter,
         "duplicate_titles": duplicate_titles,
+        "duplicate_stems": duplicate_stems,
         "missing_summaries": sorted(missing_summaries),
+        "machine_path_sources": machine_path_sources,
+        "snapshot_mismatch": snapshot_mismatch,
         "orphan_pages": sorted(orphan_pages),
         "typed_relationship_issues": typed_relationship_issues,
+        # Sorted by page: these findings get diffed between CI runs.
+        "temporal_errors": sorted(temporal_errors, key=lambda item: item["page"]),
+        "superseded_dangling": sorted(superseded_dangling, key=lambda item: item["page"]),
         "confidence_missing_fields": confidence_missing_fields,
+        "trust_metadata_errors": trust_metadata_errors,
         "confidence_review_stale": trust_report["stale"] if trust_report else [],
         "confidence_unreviewed": trust_report["unreviewed"] if trust_report else [],
         "confidence_mismatches": trust_report["score_mismatches"] if trust_report else [],
         "confidence_ledger_errors": trust_report["errors"] if trust_report else [],
+        "illegal_lifecycle_transitions": illegal_lifecycle_transitions,
     }
     counts = {name: len(items) for name, items in findings.items()}
 
@@ -326,6 +580,7 @@ def lint_vault(
         "confidence_ledger_errors",
         "confidence_review_stale",
         "confidence_unreviewed",
+        "illegal_lifecycle_transitions",
     )
     trust_findings_present = any(counts[name] for name in trust_finding_names)
     trust_fails = strict_trust and any(
@@ -335,15 +590,31 @@ def lint_vault(
             "confidence_mismatches",
             "confidence_ledger_errors",
             "confidence_review_stale",
+            "illegal_lifecycle_transitions",
         )
     )
 
-    if counts["broken_links"] or counts["missing_frontmatter"] or trust_fails:
+    if (
+        counts["broken_links"]
+        or counts["missing_frontmatter"]
+        or counts["trust_metadata_errors"]
+        or counts["temporal_errors"]
+        or trust_fails
+    ):
         status = "fail"
     elif (
         any(
             counts[name]
-            for name in ("duplicate_titles", "missing_summaries", "orphan_pages", "typed_relationship_issues")
+            for name in (
+                "duplicate_titles",
+                "duplicate_stems",
+                "missing_summaries",
+                "machine_path_sources",
+                "snapshot_mismatch",
+                "orphan_pages",
+                "typed_relationship_issues",
+                "superseded_dangling",
+            )
         )
         or trust_findings_present
     ):
@@ -353,6 +624,12 @@ def lint_vault(
 
     return {
         "status": status,
+        "schema": {
+            "source": schema_source,
+            "allowed_lifecycles": sorted(lifecycles),
+            "allowed_relationship_types": sorted(relationship_types),
+            "required_trust_fields": list(trust_fields),
+        },
         "stats": {
             "pages": len(pages),
             "link_count": sum(len(page["links"]) for page in pages),

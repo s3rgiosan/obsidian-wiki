@@ -1,12 +1,7 @@
 ---
 name: llm-wiki
 description: >
-  The foundational knowledge distillation pattern for building and maintaining an AI-powered Obsidian wiki.
-  Based on Andrej Karpathy's LLM Wiki architecture. Use this skill whenever the user wants to understand the
-  wiki pattern, set up a new knowledge base, or needs guidance on the three-layer architecture (raw sources →
-  wiki → schema). Also use when discussing knowledge management strategy, wiki structure decisions, or how
-  to organize distilled knowledge. This is the "theory" skill — other skills handle specific operations
-  (ingesting, querying, linting).
+  Explain and apply the foundational LLM Wiki architecture and knowledge-management strategy. Use for setup, architecture, schema, or organization decisions; operational ingest/query/lint work uses dedicated skills.
 ---
 
 # LLM Wiki — Knowledge Distillation Pattern
@@ -88,7 +83,8 @@ Each project directory has an overview page structured like this:
 
 ```markdown
 ---
-title: My Project
+title: >-
+    My Project
 category: project
 tags: [ai, web, backend]
 source_path: ~/.claude/projects/-Users-name-Documents-projects-my-project
@@ -111,6 +107,14 @@ One-paragraph summary of what this project is.
 ## Special Files
 
 Every wiki has these files at its root:
+
+> **Write them with `obsidian-wiki memory`, never by hand.** `index.md`,
+> `log.md`, `hot.md`, and the `_meta/` tables share one advisory lock and are
+> written atomically; hand edits in a parallel run drop whichever write lands
+> second. `obsidian-wiki memory sync <VERB> key=value` does all three
+> in one call. The full procedure — verbs, the `Key Takeaways` slot that stays
+> yours, the owner profile and todo index — is in
+> [`references/MEMORY.md`](references/MEMORY.md).
 
 ### `index.md`
 A content-oriented catalog organized by category. Each entry has a one-line summary and tags. Rebuild this after every ingest operation. Format:
@@ -151,7 +155,23 @@ The manifest enables:
 - **Audit** — which source produced which wiki page
 - **Staleness detection** — source changed but wiki page hasn't been updated
 
-**Canonical source keys.** Source keys MUST be stored in a single canonical form: **absolute paths with `~` and env vars expanded** (e.g. `/Users/me/.claude/projects/.../abc.jsonl`, never `~/.claude/...`). The manifest is keyed by the raw string, so a mix of `~`-relative and absolute keys lets the *same file* be tracked twice — and the delta check then re-ingests an already-processed file because the lookup misses the other-form key. Always expand before you compare against the manifest and before you write a new entry. To repair an existing vault that already has both forms, run `scripts/manifest.py normalize <vault>` (merges colliding entries, keeps the newest `ingested_at`).
+**Source key contract (v2).** Source keys — the `sources` keys in `.manifest.json`, the `sources:` frontmatter values on pages, and a project's `source_repo` — MUST be machine-portable. A vault is synced across machines, so a bare absolute path (`/Users/...`, `/home/...`) is never a valid stored key. This is the single canonical definition; other skills reference it rather than restating it.
+
+| Where the source lives | Canonical key form | Example |
+|---|---|---|
+| Inside the vault | **vault-relative path** — POSIX separators, no leading `./`, no `..` | `Raw/database/postgres.pdf`, `Clippings/article.md` |
+| Under `$HOME` | **home-relative path** — starts with `~` | `~/.claude/projects/-Users-name-my-app/abc.jsonl` |
+| Not a file at all | **pseudo-key** — any `scheme:`/`://` identifier, treated as opaque | `url:https://example.com/article`, `agent:claude/<session-id>` |
+
+Rules:
+
+1. **Never store a bare absolute path.** Convert before writing, not after.
+2. **Normalize before comparing.** Expand `~` and environment variables, resolve vault-relative keys against the vault root, and treat `scheme:`/`://` pseudo-keys as opaque identifiers. Never compare raw strings without normalizing first.
+3. **Identity survives path changes.** The same logical source keeps the same key across machines.
+4. **Pseudo-keys are an open namespace.** What makes a key a pseudo-key is its shape (`scheme:` or `://`, so it can never be mistaken for a file path), not a fixed list of names. Recommended names: `repo:<host/owner/name>` for a git project, `url:<canonical-url>` for a web page, `agent:<agent>/<id>` for an agent session. A source that is neither in the vault nor under `$HOME` still needs one — do not let it fall back to an absolute path.
+5. **Project identity is a repository, not a checkout.** In the `projects` block, identify a project by `source_repo` (`host/owner/name`) rather than a machine path. A machine-specific checkout location, if useful at all, belongs in an optional `source_cwd_hint` (`~`-relative), never in the identity.
+
+Reading is backward compatible: an existing manifest full of absolute keys keeps working, and `scripts/manifest.py migrate <vault> --dry-run` converts it to contract v2 (merging collisions, keeping the newest `ingested_at`). **If the vault has moved between machines**, its absolute keys are rooted at the *old* vault path, which matches neither the new vault nor `$HOME` — pass that old root explicitly with `migrate <vault> --from-root <old-vault-root>` (repeat the flag if the vault lived at more than one location). The command then reports `nothing portable to write — N key(s) kept non-portable` rather than claiming success. New writes go through the same normalization, so a skill may pass an absolute path to `obsidian-wiki cache-update` and still have a portable key land in the manifest.
 
 **Recording provenance.** When you write a manifest entry, populate `pages_created` and `pages_updated` with the vault-relative page paths that source contributed to. This is what makes re-ingestion (when a source changes) able to find the pages to revisit, instead of guessing.
 
@@ -161,7 +181,8 @@ When creating a new wiki page, use this structure:
 
 ```markdown
 ---
-title: Page Title
+title: >-
+    Page Title
 category: concepts
 tags: [ml, architecture]
 aliases: [alternate name]
@@ -169,7 +190,8 @@ relationships:
   - target: "[[concepts/related-concept]]"
     type: extends
 sources: [papers/attention.pdf]
-summary: One or two sentences, ≤200 chars, so a reader (or another skill) can preview this page without opening it.
+summary: >-
+    One or two sentences, ≤200 chars, so a reader (or another skill) can preview this page without opening it.
 provenance:
   extracted: 0.72
   inferred: 0.25
@@ -180,6 +202,10 @@ lifecycle_changed: 2024-03-15
 tier: supporting
 created: 2024-03-15T10:30:00Z
 updated: 2024-03-15T10:30:00Z
+# Optional. Written only by `obsidian-wiki snapshots set` / `apply` — do not hand-author.
+# Quoted wikilinks with |title: Obsidian Properties does not treat Markdown [text](path) as links.
+snapshots:
+  - "[[_raw/_archived/example-clip|example-clip]]"
 ---
 
 # Page Title
@@ -200,8 +226,18 @@ Things that are unresolved or need more sources.
 
 ## Sources
 
-- [[references/attention-is-all-you-need]] — Original paper
+- [[_raw/_archived/example-clip.md]] — snapshot this page was distilled from
 ```
+
+**Sources section (required, last body section).** Every wiki page ends with `## Sources`. Entries must be clickable in Obsidian:
+
+- **Local snapshot** (raw ingest, dropped PDFs/images, Web Clipper files, anything that landed in `_raw/` and was archived): `[[_raw/_archived/<filename>]]` in the body **Sources** section (body wikilinks may include `.md`). YAML `sources:` stays origin keys (`url:`, `agent:`, repo paths, …), **not** the archive path. YAML `snapshots:` is separate: after moving a file to `_raw/_archived/`, run `obsidian-wiki snapshots set <page> --archive _raw/_archived/<filename>` then `obsidian-wiki cache-update` on that **archived** path. The CLI writes a **List** of quoted wikilinks with display text, e.g. `"[[_raw/_archived/clip|clip]]"` (no `.md` in the target; `|clip` is what Properties shows). Do **not** put Markdown `[title](path)` in `snapshots:` — Properties leaves those as unclickable text. The snapshots CLI does not touch the body. Do not link the webpage recorded in clipping frontmatter — that URL is mutable origin metadata.
+- **Fetched URL** (`/ingest-url` with no saved snapshot): a markdown link to the canonical URL, and YAML `sources:` as `url:<canonical-url>`.
+- Do not mix those up. A clip of a page is not an ingest-from-URL.
+
+Related wiki pages stay in **Related** / `relationships:`, not in Sources.
+
+**Parser-safe scalars.** Write free-text frontmatter values — at minimum `title` and `summary` — with folded scalar syntax (`>-`) as shown above: a bare scalar containing `: ` (colon + space), `#`, or quotes breaks YAML parsing, and Obsidian then reports "Invalid properties" and hides the frontmatter. Keep the value indented on the line(s) following `title: >-` / `summary: >-`.
 
 ## Paper Deep-Dive Template
 
@@ -263,7 +299,8 @@ Typed `[[wikilinks]]` to neighbouring work.
 
 ## Sources
 
-- Clickable canonical link, e.g. <https://arxiv.org/abs/XXXX.XXXXX>
+- [[_raw/_archived/paper.pdf]] — snapshot distilled (if a local PDF/clip was ingested)
+- <https://arxiv.org/abs/XXXX.XXXXX> — only if this ingest fetched the URL and there is no local snapshot
 ````
 
 A Mermaid diagram reconstructed from the paper's prose is a synthesis, not a transcription — treat it as `^[inferred]` when the interpretation is non-trivial.
@@ -271,6 +308,8 @@ A Mermaid diagram reconstructed from the paper's prose is a synthesis, not a tra
 ## Provenance Markers
 
 Every claim on a wiki page has one of three provenance states. Mark them inline so the reader (and future ingest passes) can tell signal from synthesis.
+
+These are framework defaults. A vault's `AGENTS.md` may add markers or workflow flags. Preserve owner extensions and treat orthogonal workflow flags separately from the extracted/inferred/ambiguous truth-state axis.
 
 | State | Marker | Meaning |
 |---|---|---|
@@ -324,6 +363,8 @@ Each entry has two required fields:
 
 ### Allowed relationship types
 
+The table below is the framework default allowlist. A vault's `AGENTS.md` may extend it; consumers must use the effective allowlist and preserve owner semantics without coercion.
+
 | Type | Meaning | Example |
 |---|---|---|
 | `extends` | This page builds on or generalises the target | GPT extends Transformer Architecture |
@@ -346,6 +387,10 @@ Skills that read `relationships:`: `wiki-export` (emits typed edges), `cross-lin
 ## Confidence and Lifecycle
 
 Every page carries two orthogonal trust signals plus an optional supersession link.
+
+The requiredness and lifecycle values below are framework defaults. A vault's `AGENTS.md` may extend lifecycle values or make trust fields optional. Validators must apply that effective owner schema while still validating any trust value that is present.
+
+The deterministic lint/trust consumer accepts owner schema through `OBSIDIAN_ALLOWED_LIFECYCLES`, `OBSIDIAN_ALLOWED_RELATIONSHIP_TYPES`, `OBSIDIAN_REQUIRED_TRUST_FIELDS`, and `OBSIDIAN_SCHEMA_SOURCE`. Resolution precedence is CLI > environment/config > these framework defaults (with lifecycle and relationship extensions additive). Explicit blank or whitespace-only values fail closed; omit the variable to select defaults. `wiki-lint/SKILL.md` owns the operational invocation contract.
 
 ### Required fields
 
@@ -425,6 +470,8 @@ Five states. **`stale` is not a state** — it is a computed overlay: `is_stale 
 
 Only ingest skills set `draft`. All other transitions require a human editor. Update `lifecycle_changed` whenever the state changes.
 
+Two edge classes are therefore **illegal** and are reported by `obsidian-wiki lint` as `illegal_lifecycle_transitions`: anything falling back to `draft` (`reviewed|verified|disputed → draft`), and any exit from `archived` (it is terminal — restoring a page is a deliberate delete-and-recreate, not a transition). The check compares against the lifecycle recorded in `_meta/trust-ledger.json` at the page's last review, so it only sees pages that have been reviewed at least once.
+
 ## Importance Tiering
 
 The `tier:` field controls which pages get updated on each ingest pass and their priority in retrieval. As wikis grow, re-reading every page on every ingest wastes tokens — tiering lets ingest and query skills focus effort where it matters most.
@@ -494,7 +541,7 @@ Use the cheapest verification path that proves the new content is visible: `qmd 
 
 ## Link Format
 
-All internal links connecting wiki pages are controlled by `OBSIDIAN_LINK_FORMAT` (read from `~/.obsidian-wiki/config` or `.env`, default: `wikilink`).
+All internal links connecting wiki pages are controlled by `OBSIDIAN_LINK_FORMAT` from the resolved config (default: `wikilink`).
 
 | Setting | Syntax | Example |
 |---|---|---|
@@ -523,14 +570,32 @@ Every write skill reads `OBSIDIAN_LINK_FORMAT` from config before generating lin
 
 ## Config Resolution Protocol
 
-**All skills must resolve config using this algorithm — do not hard-code `.env` or `~/.obsidian-wiki/config` directly.** This ensures single-vault, multi-vault, project-local, and VPS setups all work correctly.
+**All skills must resolve config using this algorithm — do not hard-code `.env` or the global config path directly.** This ensures single-vault, multi-vault, project-local, and VPS setups all work correctly.
+
+### Global config directory
+
+The global config directory is **XDG-style**: `$XDG_CONFIG_HOME/obsidian-wiki` (default `~/.config/obsidian-wiki`). Installs that already have a `~/.obsidian-wiki` directory keep using it — so an existing setup never breaks — but any **new** install lands under the XDG path. Resolve it with:
+
+```
+obsidian_wiki_config_dir() {
+  local xdg_dir="${XDG_CONFIG_HOME:-$HOME/.config}/obsidian-wiki"
+  local legacy_dir="$HOME/.obsidian-wiki"
+  if [[ -d "$legacy_dir" && ! -e "$xdg_dir" ]]; then
+    echo "$legacy_dir"
+  else
+    echo "$xdg_dir"
+  fi
+}
+```
+
+Everywhere below, "the global config dir" means `$(obsidian_wiki_config_dir)`, and "the global config" means `$(obsidian_wiki_config_dir)/config`.
 
 ### Resolution order
 
-0. **Inline vault override (`@name`)** — if the user's request contains an `@<name>` token (e.g. `@work save this`, `query @personal about X`), resolve `~/.obsidian-wiki/config.<name>` directly and use its `OBSIDIAN_VAULT_PATH`. This **overrides** both the CWD `.env` walk-up and the active symlink, and applies to **that invocation only** — never run `ln -sf` or otherwise change the active vault for an `@name` request. If `~/.obsidian-wiki/config.<name>` doesn't exist, tell the user it doesn't exist and list the available vaults (the `wiki-switch` **List** logic), then stop — do **not** silently fall back to the default. The `@name` is a routing directive, not content: strip it out before treating the rest of the request as the actual instruction or page text.
-1. **Claude instance match (`$CLAUDE_CONFIG_DIR`)** — if `$CLAUDE_CONFIG_DIR` is set (Claude Code sets it for non-default instances), scan `~/.obsidian-wiki/config*` and use the one whose `CLAUDE_HISTORY_PATH` matches it. Each Claude instance gets its own vault this way.
-2. **Walk up from CWD** — look for a `.env` file in the current directory, then each parent, up to `$HOME`. Stop at the first `.env` that contains `OBSIDIAN_VAULT_PATH`.
-3. **Global config** — if no local `.env` found, read `~/.obsidian-wiki/config`.
+0. **Inline vault override (`@name`)** — if the user's request contains an `@<name>` token (e.g. `@work save this`, `query @personal about X`), resolve `<global config dir>/config.<name>` directly and use its `OBSIDIAN_VAULT_PATH`. This **overrides** both the CWD `.env` walk-up and the active symlink, and applies to **that invocation only** — never run `ln -sf` or otherwise change the active vault for an `@name` request. If `<global config dir>/config.<name>` doesn't exist, tell the user it doesn't exist and list the available vaults (the `wiki-switch` **List** logic), then stop — do **not** silently fall back to the default. The `@name` is a routing directive, not content: strip it out before treating the rest of the request as the actual instruction or page text.
+1. **Claude instance match (`$CLAUDE_CONFIG_DIR`)** — if `$CLAUDE_CONFIG_DIR` is set (Claude Code sets it for non-default instances), scan `<global config dir>/config*` and use the one whose `CLAUDE_HISTORY_PATH` matches it. Each Claude instance gets its own vault this way.
+2. **Walk up from CWD** — look for a `.env` file in the current directory, then each parent, up to `$HOME`. Stop at the first `.env` that contains `OBSIDIAN_VAULT_PATH`. If its value is empty, stop there too: tell the user which `.env` blocked resolution (a blank line copied from `.env.example` does this) instead of falling through to the global config.
+3. **Global config** — if no local `.env` found, read the global config (`$(obsidian_wiki_config_dir)/config`).
 4. **Prompt setup** — if neither exists, tell the user: "No config found. Run `wiki-setup` to initialize your wiki."
 
 `@name` is a **per-invocation override** — it targets one vault for one request. `/wiki-switch <name>` is the **persistent default** — it re-points the active symlink for all future requests. Use `@name` to touch the other vault from anywhere without disturbing your default ("brain") vault.
@@ -538,12 +603,14 @@ Every write skill reads `OBSIDIAN_LINK_FORMAT` from config before generating lin
 ```
 find_config() {
   # $1 = parsed @name from the request, if any (else empty)
+  local config_dir
+  config_dir="$(obsidian_wiki_config_dir)"
   if [[ -n "$1" ]]; then
-    [[ -f "$HOME/.obsidian-wiki/config.$1" ]] && { echo "$HOME/.obsidian-wiki/config.$1"; return; }
+    [[ -f "$config_dir/config.$1" ]] && { echo "$config_dir/config.$1"; return; }
     echo ""; return   # named vault missing → caller reports + lists, no fallback
   fi
   if [[ -n "$CLAUDE_CONFIG_DIR" ]]; then
-    for c in "$HOME"/.obsidian-wiki/config*; do
+    for c in "$config_dir"/config*; do
       [[ -f "$c" ]] || continue
       grep -q "CLAUDE_HISTORY_PATH=.*${CLAUDE_CONFIG_DIR%/}" "$c" && { echo "$c"; return; }
     done
@@ -553,7 +620,7 @@ find_config() {
     [[ -f "$dir/.env" ]] && grep -q "OBSIDIAN_VAULT_PATH" "$dir/.env" && { echo "$dir/.env"; return; }
     dir="$(dirname "$dir")"
   done
-  [[ -f "$HOME/.obsidian-wiki/config" ]] && { echo "$HOME/.obsidian-wiki/config"; return; }
+  [[ -f "$config_dir/config" ]] && { echo "$config_dir/config"; return; }
   echo ""
 }
 ```
@@ -564,14 +631,22 @@ Skills that write runtime state (e.g. `daily-update`) must scope that state to t
 
 ```
 VAULT_ID=$(echo "$OBSIDIAN_VAULT_PATH" | md5sum 2>/dev/null || md5 -q - <<< "$OBSIDIAN_VAULT_PATH" | cut -c1-8)
-STATE_DIR="$HOME/.obsidian-wiki/state/$VAULT_ID"
+STATE_DIR="$(obsidian_wiki_config_dir)/state/$VAULT_ID"
 ```
 
 ### Standard "Before You Start" block
 
 Every skill's setup section should read:
 
-> **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md`. Honor an inline `@name` override first, then a `$CLAUDE_CONFIG_DIR` instance match against `~/.obsidian-wiki/config*`, then walk up from CWD for `.env`, fall back to `~/.obsidian-wiki/config`, else prompt setup. This gives `OBSIDIAN_VAULT_PATH` and any tool-specific path overrides.
+> **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md`. Honor an inline `@name` override first, then a `$CLAUDE_CONFIG_DIR` instance match against `<global config dir>/config*`, then walk up from CWD for `.env`, fall back to the global config, else prompt setup. This gives `OBSIDIAN_VAULT_PATH` and any tool-specific path overrides.
+
+## Writing Profile Resolution
+
+Before drafting or rewriting natural-language Markdown, resolve the global config directory with the XDG/legacy algorithm above, then read `<global config dir>/WRITING.md` when it exists. A missing or empty `WRITING.md` means there are no custom writing preferences. If that optional read fails, warn and continue with the default framework guidance.
+
+The effective precedence is framework invariants > current task/skill requirements > current project `AGENTS.md` > vault `AGENTS.md` > global `WRITING.md`. Framework invariants include schema, provenance, and safety; operation-specific requirements remain authoritative for the current task. Unspecified project and vault rules are inherited from less-specific layers, and more specific same-topic rules win.
+
+Writing preferences apply only to newly drafted or rewritten natural-language fields and body content. This includes natural-language title and summary values in YAML frontmatter, but preferences cannot alter YAML syntax, required keys, structure, types, or machine-generated fields. JSON, structured logs, and pass-through content remain unchanged and retain their required formats and source fidelity.
 
 ## Environment Variables
 
@@ -589,6 +664,14 @@ The wiki is configured through environment variables (see `.env.example`). The o
 - `OBSIDIAN_LINK_FORMAT` — Internal link syntax: `wikilink` (default) or `markdown`
 - `WIKI_TOKEN_WARN_THRESHOLD` — Emit a warning in `wiki-status` when the full-wiki token estimate exceeds this value (default: `100000`). Set to `0` to disable. See `wiki-status` for the token footprint report.
 - `WIKI_STAGED_WRITES` — When `true`, all LLM-written pages go to `_staging/<category>/` for human review before promotion. See `wiki-setup` and `wiki-stage-commit` for details.
+- `CODE_UNDERSTANDING_BACKEND` — how wiki-update understands a project before distilling: `auto` (CodeGraph when available, else builtin ast-extract + rg; default), `builtin`, or `codegraph` (explicitly require; warn/error if unavailable).
+- `CODE_UNDERSTANDING_CODEGRAPH_BIN` — optional path to the codegraph binary when it isn't on PATH.
+- `CODE_UNDERSTANDING_CODEGRAPH_BIN` — optional path to the codegraph binary when it isn't on PATH.
+  Both resolve like `OBSIDIAN_VAULT_PATH`: a real environment variable wins (empty counts as
+  unset), then the nearest `.env` walking up from the project directory, then the global config
+  (`$(obsidian_wiki_config_dir)/config`), then the default.
+- `OBSIDIAN_MAX_PAGES_PER_INGEST` — cap on pages created/updated per `wiki-ingest` run (default: `15`). See `wiki-ingest`, Step 4.
+- `LINT_SCHEDULE` — how often `daily-update` also runs `wiki-lint`: `daily` \| `weekly` (default) \| `manual`. See `daily-update`, Step 4a.
 
 No API keys are needed — the agent running these skills already has LLM access built in.
 

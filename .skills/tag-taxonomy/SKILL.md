@@ -1,12 +1,7 @@
 ---
 name: tag-taxonomy
 description: >
-  Enforce consistent tagging across the Obsidian wiki using a controlled vocabulary.
-  Use this skill when the user says "fix my tags", "normalize tags", "clean up tags",
-  "tag audit", "what tags should I use", "tag taxonomy", or whenever you're creating or
-  updating wiki pages and need to choose the right tags. Also trigger when the user asks
-  about tag conventions, wants to add a new tag to the taxonomy, or says "my tags are a mess".
-  Always consult this skill's taxonomy file before assigning tags to any wiki page.
+  Apply and maintain the wiki's controlled tag vocabulary. Use for choosing, normalizing, auditing, or extending tags when creating or updating wiki pages; consult the taxonomy before assigning tags.
 ---
 
 # Tag Taxonomy — Controlled Vocabulary for Wiki Tags
@@ -15,7 +10,7 @@ You are enforcing consistent tagging across the wiki by normalizing tags to a co
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH`
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH`
 2. Read `$OBSIDIAN_VAULT_PATH/_meta/taxonomy.md` — this is the canonical tag list
 3. Read `index.md` to understand the wiki's scope
 
@@ -168,19 +163,22 @@ When the user wants to add a tag to the vocabulary:
 
 ## After Any Tag Operation
 
-Append to `log.md`:
+One locked call updates the log, the index (tags appear in index entries), and the hot cache:
 
-```
-- [TIMESTAMP] TAG_AUDIT tags_normalized=N unknown_tags=M pages_modified=P
+```bash
+# audit
+obsidian-wiki memory sync TAG_AUDIT \
+  tags_normalized=<N> unknown_tags=<M> pages_modified=<P> \
+  --takeaways "Tag audit: normalized 14 tags across 28 pages; 2 new canonical tags added."
+
+# normalization
+obsidian-wiki memory sync TAG_NORMALIZE \
+  tags_renamed=<N> pages_modified=<M> new_tags_added=<P>
 ```
 
-Or for normalization:
+Never hand-edit `index.md`, `log.md`, or `hot.md` — the command takes the lock that keeps a parallel writer from dropping your update.
 
-```
-- [TIMESTAMP] TAG_NORMALIZE tags_renamed=N pages_modified=M new_tags_added=P
-```
-
-**`hot.md`** — Read `$OBSIDIAN_VAULT_PATH/hot.md` (create from the template in `wiki-ingest` if missing). Update **Recent Activity** with a one-line summary — e.g. "Tag audit: normalized 14 tags across 28 pages; 2 new canonical tags added." Keep the last 3 operations. Update `updated` timestamp.
+See `.skills/llm-wiki/references/MEMORY.md` for the full procedure.
 
 ## QMD Refresh After Vault Writes
 

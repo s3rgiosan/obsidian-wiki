@@ -14,6 +14,12 @@ def run_cli(
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["HOME"] = str(home)
+    if cwd is None:
+        # Default to the fake HOME, not the repo: config resolution walks up
+        # from cwd looking for a `.env`, and a developer's own .env at the repo
+        # root would otherwise override the fixture config.
+        home.mkdir(parents=True, exist_ok=True)
+        cwd = home
     return subprocess.run(
         [sys.executable, "-m", "obsidian_wiki.cli", *args],
         capture_output=True,
@@ -98,6 +104,7 @@ def test_context_pack_stops_at_empty_nearest_local_vault_config(
 
     assert proc.returncode == 1
     assert "vault not configured" in proc.stderr
+    assert str(project / ".env") in proc.stderr
     assert "global.md" not in proc.stdout
 
 
@@ -236,3 +243,21 @@ def test_context_pack_requires_a_configured_vault(tmp_path: Path) -> None:
 
     assert proc.returncode == 1
     assert "vault not configured" in proc.stderr
+
+
+def test_schema_commands_name_the_empty_local_env(tmp_path: Path) -> None:
+    # memory/lint/staging/trust resolve through a second walk-up; a blank
+    # OBSIDIAN_VAULT_PATH= copied from .env.example must be reported by path.
+    home = tmp_path / "home"
+    global_vault = make_vault(tmp_path)
+    config = home / ".obsidian-wiki" / "config"
+    config.parent.mkdir(parents=True)
+    config.write_text(f'OBSIDIAN_VAULT_PATH="{global_vault}"\n', encoding="utf-8")
+    project = home / "project"
+    project.mkdir()
+    (project / ".env").write_text("OBSIDIAN_VAULT_PATH=\n", encoding="utf-8")
+
+    proc = run_cli(home, "memory", "status", cwd=project)
+
+    assert proc.returncode == 1
+    assert f"{project / '.env'} sets OBSIDIAN_VAULT_PATH to empty" in proc.stderr

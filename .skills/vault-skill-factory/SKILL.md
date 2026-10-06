@@ -1,14 +1,7 @@
 ---
 name: vault-skill-factory
 description: >
-  Generate a portable, self-contained Agent Skill from mature, curated Obsidian wiki pages —
-  turning a cluster of verified knowledge into a reusable "digital expert" (SKILL.md + references/).
-  Use this skill when the user says "/vault-skill-factory", "make a skill from my wiki", "turn these
-  pages into a skill", "generate an agent skill from my vault", "package my notes on X as a skill",
-  "build a domain-expert skill from my wiki", or wants to distill recurring, mature wiki knowledge
-  into a shareable skill. Inspired by OpenKB's "drop in a book → out comes a digital expert" pattern.
-  The factory ONLY reads the vault and WRITES TO A REVIEW DIRECTORY — it never installs skills,
-  never writes into .skills/, and never touches global skill directories.
+  Create a reviewable Agent Skill package from mature curated wiki pages. Use when turning verified vault knowledge into a reusable skill. Reads the vault and writes only to a review directory; it does not install skills.
 ---
 
 # Vault Skill Factory
@@ -102,7 +95,15 @@ one-line-install convention) — still **not** an install, just a manifest.
 
 ## Step 4: Optionally lean on skill-creator
 
-`skill-creator` ships reusable scripts (`$OBSIDIAN_WIKI_REPO/.skills/skill-creator/scripts/`):
+`skill-creator` ships reusable scripts. Their path differs between a pip/uv install and a source
+checkout, so check both layouts under `$OBSIDIAN_WIKI_REPO` and use the first that exists:
+
+- `$OBSIDIAN_WIKI_REPO/skills/skill-creator/scripts/` — packaged install (`OBSIDIAN_WIKI_REPO` points
+  at the bundled `_data/` dir, which ships the skills under `skills/`).
+- `$OBSIDIAN_WIKI_REPO/.skills/skill-creator/scripts/` — source checkout.
+
+Whichever resolves, it holds:
+
 - `improve_description.py` — tighten the generated `description` for better triggering.
 - `package_skill.py` — bundle the skill dir into a distributable archive.
 - `quick_validate.py` — sanity-check the skill's structure.

@@ -23,6 +23,7 @@ def _run(home: Path, *args: str, config_dir: Path | None = None) -> subprocess.C
     env["HOME"] = str(home)
     env["PYTHONPATH"] = str(ROOT)
     env.pop("CLAUDE_CONFIG_DIR", None)
+    env.pop("XDG_CONFIG_HOME", None)
     if config_dir is not None:
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
     return subprocess.run(
@@ -59,7 +60,7 @@ class ClaudeInstanceTest(unittest.TestCase):
 
             _run(home, "setup", "--vault", str(vault), config_dir=instance)
 
-            config = (home / ".obsidian-wiki" / "config").read_text(encoding="utf-8")
+            config = (home / ".config" / "obsidian-wiki" / "config").read_text(encoding="utf-8")
             self.assertIn(f'CLAUDE_HISTORY_PATH="{instance}"', config)
 
     def test_config_pins_the_instance_when_the_env_var_is_absent(self) -> None:

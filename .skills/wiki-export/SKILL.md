@@ -1,13 +1,7 @@
 ---
 name: wiki-export
 description: >
-  Export the Obsidian wiki's knowledge graph to structured formats for use in external tools.
-  Use this skill when the user says "export wiki", "export graph", "export to JSON", "export to Gephi",
-  "export to Neo4j", "graphml", "visualize wiki", "knowledge graph export", "export to OKF",
-  "OKF bundle", "open knowledge format", "export as markdown bundle", or wants to use their
-  wiki data in another tool. Outputs graph.json, graph.graphml, cypher.txt (Neo4j), and graph.html
-  (interactive browser visualization) into a wiki-export/ directory at the vault root, plus an
-  optional OKF (Open Knowledge Format) markdown bundle under wiki-export/okf/.
+  Export the Obsidian wiki graph to JSON, GraphML, Neo4j Cypher, Postgres/SQL, HTML, or OKF bundles. Use when transferring or visualizing wiki data in external tools; wiki-import handles the reverse direction.
 ---
 
 # Wiki Export — Knowledge Graph Export
@@ -16,7 +10,7 @@ You are exporting the wiki's wikilink graph to structured formats so it can be u
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH`
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH`
 2. Confirm the vault has pages to export — if fewer than 5 pages exist, warn the user and stop
 
 ## Project Filter (optional)
@@ -88,7 +82,7 @@ This enables community-based coloring in the HTML visualization and tools like G
 
 ## Step 3: Write the Output Files
 
-Create `wiki-export/` at the vault root if it doesn't exist. Write all four files:
+Create `wiki-export/` at the vault root if it doesn't exist. Write all five files:
 
 ---
 
@@ -200,7 +194,61 @@ Write one `MERGE` node statement per page, then one `MATCH`/`MERGE` relationship
 
 ---
 
-### 3d. `graph.html`
+### 3d. `postgres.sql`
+
+Plain SQL — loadable into any Postgres database (local, Supabase, RDS, Neon, …) with `psql -f postgres.sql` or a migration runner. Two tables: `wiki_pages` (nodes) and `wiki_edges` (links), with `ON CONFLICT` upserts so re-running the export is safe and idempotent, mirroring the `MERGE` semantics of `cypher.txt`.
+
+```sql
+-- Wiki knowledge graph export — <TIMESTAMP>
+-- Load with: psql -d yourdb -f postgres.sql
+
+CREATE TABLE IF NOT EXISTS wiki_pages (
+  id        TEXT PRIMARY KEY,
+  label     TEXT NOT NULL,
+  category  TEXT,
+  tags      JSONB NOT NULL DEFAULT '[]'::jsonb,
+  summary   TEXT,
+  community INT
+);
+
+CREATE TABLE IF NOT EXISTS wiki_edges (
+  source     TEXT NOT NULL REFERENCES wiki_pages(id) ON DELETE CASCADE,
+  target     TEXT NOT NULL REFERENCES wiki_pages(id) ON DELETE CASCADE,
+  relation   TEXT NOT NULL DEFAULT 'wikilink',
+  confidence TEXT,
+  typed      BOOLEAN NOT NULL DEFAULT false,
+  PRIMARY KEY (source, target, relation)
+);
+
+CREATE INDEX IF NOT EXISTS wiki_edges_source_idx ON wiki_edges(source);
+CREATE INDEX IF NOT EXISTS wiki_edges_target_idx ON wiki_edges(target);
+
+-- Nodes
+INSERT INTO wiki_pages (id, label, category, tags, summary, community)
+VALUES ('concepts/transformers', 'Transformer Architecture', 'concepts', '["ml","architecture"]'::jsonb, 'The attention-based architecture introduced in Attention Is All You Need.', 0)
+ON CONFLICT (id) DO UPDATE SET
+  label = EXCLUDED.label, category = EXCLUDED.category, tags = EXCLUDED.tags,
+  summary = EXCLUDED.summary, community = EXCLUDED.community;
+
+-- Edges
+-- Untyped wikilink
+INSERT INTO wiki_edges (source, target, relation, confidence, typed)
+VALUES ('concepts/transformers', 'entities/vaswani', 'wikilink', 'EXTRACTED', false)
+ON CONFLICT (source, target, relation) DO UPDATE SET confidence = EXCLUDED.confidence, typed = EXCLUDED.typed;
+
+-- Typed edge from relationships: block
+INSERT INTO wiki_edges (source, target, relation, confidence, typed)
+VALUES ('concepts/transformers', 'concepts/lstm', 'contradicts', 'EXTRACTED', true)
+ON CONFLICT (source, target, relation) DO UPDATE SET confidence = EXCLUDED.confidence, typed = EXCLUDED.typed;
+```
+
+Write one `INSERT ... ON CONFLICT (id) DO UPDATE` statement per page (values escaped: single quotes doubled, `tags` serialized as a JSON array literal cast to `jsonb`), then one `INSERT ... ON CONFLICT (source, target, relation) DO UPDATE` per edge. `relation` stays lowercase here (unlike the uppercased Cypher relationship label) since it's a plain column value, not a schema identifier — this keeps it directly filterable with `WHERE relation = 'contradicts'` or joinable without case-folding. `typed` is `true` only for edges promoted by a `relationships:` frontmatter entry; plain wikilinks stay `false`.
+
+Skip pages whose `id` collides only after the `ON CONFLICT` clause fires from a prior run — do not attempt to deduplicate synthetic multi-edges (e.g. same source/target with both a `wikilink` and a typed relation) since the composite primary key `(source, target, relation)` already keeps them as distinct rows, matching the "typed version wins" merge behavior of `graph.json`/`graph.graphml` at the query layer (`SELECT * FROM wiki_edges WHERE source=$1 AND target=$2 ORDER BY typed DESC LIMIT 1`).
+
+---
+
+### 3e. `graph.html`
 
 A self-contained interactive visualization using the vis.js CDN (no local dependencies). The user opens this file in any browser — no server needed.
 
@@ -309,9 +357,9 @@ Replace `/* NODES_JSON */` and `/* EDGES_JSON */` with the actual JSON arrays yo
 
 ## Step 3.5: OKF Bundle Export (optional)
 
-Run this step **only** when the user asks for OKF / a markdown bundle (phrases like "export to OKF", "OKF bundle", "open knowledge format", "export as markdown bundle"). It is additive — the four graph files above are always produced; this writes an extra full-fidelity markdown bundle.
+Run this step **only** when the user asks for OKF / a markdown bundle (phrases like "export to OKF", "OKF bundle", "open knowledge format", "export as markdown bundle"). It is additive — the five graph files above are always produced; this writes an extra full-fidelity markdown bundle.
 
-The four graph files are a *lossy* projection (graph skeleton only). An **OKF bundle is the actual page bodies**, so an export→`wiki-import` round-trip through OKF preserves full content, and the bundle drops straight into MkDocs, Notion, Hugo, GitHub's renderer, or any [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) consumer.
+The five graph files are a *lossy* projection (graph skeleton only). An **OKF bundle is the actual page bodies**, so an export→`wiki-import` round-trip through OKF preserves full content, and the bundle drops straight into MkDocs, Notion, Hugo, GitHub's renderer, or any [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) consumer.
 
 ### Canonical frontmatter mapping (obsidian-wiki ⇄ OKF)
 
@@ -323,15 +371,18 @@ This table is the single source of truth for the mapping; `wiki-import` referenc
 | `title`       | `title`                 | `title`                  | Verbatim. |
 | `description` | `summary`               | `summary`                | Our one-line `summary:` is exactly OKF's `description` (used in `index.md` entries). |
 | `tags`        | `tags`                  | `tags`                   | Verbatim list. `visibility/*` system tags pass through unchanged. |
-| `timestamp`   | `updated`               | `updated`                | ISO 8601 both sides. |
+| `generated`   | `updated` → `generated.at`; `by` is the producer | `updated` ← `generated.at` | Write `generated: { by: obsidian-wiki/<version>, at: <datetime> }`, taking `<version>` from `obsidian-wiki --version` (plain `obsidian-wiki` if the CLI isn't installed). OKF §5 requires every timestamp to be a datetime with an explicit offset, so a date-only `updated: 2026-04-12` becomes `2026-04-12T00:00:00Z`. Replaces v0.1's `timestamp`, which is no longer written. |
+| `sources`     | `sources` (list of strings) | `sources` (list of strings) | OKF `sources` is a list of objects with a required `resource`, so each native string becomes `- resource: <string>`. Opaque strings like `conversation:2026-04-12` are valid: §5.1 allows scope descriptors a consumer can't follow. Emit nothing else per entry, so import recovers the exact strings. |
+| `status`      | `lifecycle`             | — (native `lifecycle` is preserved) | `draft` → `draft`; `reviewed`, `verified`, `disputed` → `stable`; `archived` → `deprecated`. Omit `status` when `lifecycle` is absent (absent means `stable` in OKF). |
+| `verified`    | `_meta/trust-ledger.json` entry for the page | — (preserved verbatim) | Only when the page has a ledger entry: `verified: { by: human:vault-owner, at: <entry reviewed_at> }`. `trust-record` only writes entries a human approved with `--approved`, so the `human:` actor is accurate and gives the page OKF's *human-reviewed* tier (§5.3). Never derive `verified` from `lifecycle` alone. |
 | `resource`    | first `sources:` entry **iff** it is an `http(s)://` URL | — | Optional; omit when no source URL. Most pages describe abstract knowledge and have none. |
-| *(extensions)* | `category`, `sources`, `created`, `relationships`, `lifecycle`, `tier`, `base_confidence`, … | preserved verbatim | OKF §4.1 permits arbitrary keys and requires consumers to preserve them. **Writing our native keys as OKF extension frontmatter is what makes the round-trip lossless** — on import, preserved `category`/`created`/`sources` are preferred over re-deriving from `type`. |
+| *(extensions)* | `category`, `created`, `updated`, `relationships`, `lifecycle`, `lifecycle_changed`, `tier`, `base_confidence`, … | preserved verbatim | OKF §4.1 requires consumers to preserve unknown keys. **Writing our native keys as OKF extension frontmatter is what makes the round-trip lossless** — on import, preserved `category`/`created`/`updated`/`lifecycle` are preferred over re-deriving from `type`/`generated`/`status`. (`updated` rides along because `generated.at` must be a full datetime, so a date-only `updated` would otherwise come back as midnight UTC.) `sources` is *not* an extension any more: it's a spec field (row above). |
 
 ### Steps
 
 Reuse the node list from Step 1 (with any active project/visibility filters already applied). Write a directory tree under `wiki-export/okf/`:
 
-1. **One file per in-scope page.** For each page, parse its frontmatter, apply the mapping table above to build the OKF frontmatter (required `type` first, then `title`, `description`, `tags`, `timestamp`, optional `resource`, then the preserved extension keys), transform the body links (below), and write to `wiki-export/okf/<category>/<slug>.md` — same relative path the page has in the vault.
+1. **One file per in-scope page.** For each page, parse its frontmatter, apply the mapping table above to build the OKF frontmatter (required `type` first, then `title`, `description`, `tags`, `generated`, `status`, `verified`, `sources`, optional `resource`, then the preserved extension keys), transform the body links (below), and write to `wiki-export/okf/<category>/<slug>.md` — same relative path the page has in the vault.
 
 2. **Body link transform** (`[[wikilinks]]` → standard markdown links):
    - `[[concepts/transformers]]` → `[<target title>](<file-relative path>.md)`, e.g. from `entities/foo.md` a link to `concepts/transformers` becomes `[Transformer Architecture](../concepts/transformers.md)`. Link text = the target page's `title` (fall back to the target id if unknown).
@@ -341,16 +392,16 @@ Reuse the node list from Step 1 (with any active project/visibility filters alre
    - This is required for the common "folder note" layout where a page id exists both as a file and as a directory prefix, e.g. `projects/social-twitter.md` plus `projects/social-twitter/...`. From `projects/social-twitter/concepts/mem0-memory-analysis.md`, a link to `[[projects/social-twitter]]` must export to `../../social-twitter.md`, not `...md`.
    - Resolve link targets with the same normalization used in Step 1 (lowercase, spaces→hyphens, strip `.md`). Handle unresolved targets by form, so forward-references survive the round-trip:
      - **Resolves to an in-scope page** → relative markdown link to it.
-     - **Path-form target** (contains a `/`, e.g. `[[concepts/attention-mechanism]]`) with **no page yet**, and not excluded by an active filter → still emit the relative markdown link. OKF §5.3 treats a missing target as not-yet-written knowledge, and keeping the link makes the user's forward-references lossless on re-import. (Verified on st3ve: dropping these silently deleted real `[[wikilinks]]`.)
+     - **Path-form target** (contains a `/`, e.g. `[[concepts/attention-mechanism]]`) with **no page yet**, and not excluded by an active filter → still emit the relative markdown link. OKF §11 forbids rejecting a bundle over a broken cross-link, and keeping the link makes the user's forward-references lossless on re-import. (Verified on st3ve: dropping these silently deleted real `[[wikilinks]]`.)
      - **Excluded by an active project/visibility filter** → plain text. Do not emit a path pointing into filtered-out content.
      - **Bare-title target** with no match (e.g. `[[tractorex]]` when no such page exists in scope) → plain text; there is no reliable path to write.
    - Leave existing external `http(s)://` links and `# Citations` sections untouched.
 
-3. **Generate `index.md` files** (OKF §6 progressive disclosure; these contain no per-entry frontmatter):
-   - Bundle root `wiki-export/okf/index.md` — a `# Subdirectories` section listing each category folder: `* [<category>](<category>/index.md) - <one-line description of the category>`. This is the **only** index permitted frontmatter: add a single key `okf_version: "0.1"` (OKF §11).
+3. **Generate `index.md` files** (OKF §8 progressive disclosure; these contain no per-entry frontmatter):
+   - Bundle root `wiki-export/okf/index.md` — a `# Subdirectories` section listing each category folder: `* [<category>](<category>/index.md) - <one-line description of the category>`. This is the **only** index permitted frontmatter: add a single key `okf_version: "0.2"` (OKF §8, §12).
    - One `index.md` per category folder listing its pages: `* [<title>](<slug>.md) - <description from the page's summary>`.
 
-4. **Copy `log.md`** from the vault root to `wiki-export/okf/log.md` as-is (OKF §7 treats the leading bold action word as convention, so the existing line-based log is conformant).
+4. **Write `log.md`** from the vault root's `log.md`, reshaped to OKF §9, which requires `## YYYY-MM-DD` date headings, newest first. Our log is a flat, oldest-first list of `- [<timestamp>] VERB key=value …` lines, so: start with `# Wiki Update Log`; group lines by the date part of `<timestamp>`; emit groups newest first under `## <date>`; render each line as `* **<Verb>**: <rest of line>`, with the verb title-cased (`INGEST` → `Ingest`). Keep lines that don't match the pattern under the date of the line above them, verbatim after `* `. `wiki-import` ignores `log.md`, so this costs nothing on the round-trip.
 
 5. **Filters.** Honor the same project/visibility filters as the graph export — filtered pages are omitted from the bundle and their inbound links degrade to plain text per step 2.
 
@@ -365,12 +416,13 @@ Wiki export complete → wiki-export/
   graph.json    — N nodes, M edges (NetworkX node_link format)
   graph.graphml — N nodes, M edges (Gephi / yEd / Cytoscape)
   cypher.txt    — N MERGE nodes + M MERGE relationships (Neo4j)
+  postgres.sql  — N upsert rows (wiki_pages) + M upsert rows (wiki_edges) (any Postgres)
   graph.html    — interactive browser visualization (open in any browser)
 ```
 
 Append this line only when the OKF bundle was produced (Step 3.5):
 ```
-  okf/          — OKF v0.1 markdown bundle (N pages, lossless; import via wiki-import)
+  okf/          — OKF v0.2 markdown bundle (N pages, lossless; import via wiki-import)
 ```
 
 Append filter notes when active:

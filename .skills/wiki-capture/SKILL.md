@@ -1,25 +1,21 @@
 ---
 name: wiki-capture
 description: >
-  Save the current conversation as a permanent, structured wiki note. Use this skill when the user
-  says "save this", "/wiki-capture", "capture this", "file this conversation", "preserve this",
-  "add this to my wiki", or wants to turn what was just discussed into lasting knowledge. The skill
-  classifies the content, rewrites it as declarative knowledge (not a chat transcript), and places
-  it in the correct vault category. Also supports a fast QUICK MODE (`/wiki-capture --quick`, "quick
-  capture", "capture this finding", "save this bug fix", "save this gotcha", "drop this to raw", "quick
-  save to wiki") that drops findings to the `_raw/` staging area in under 60 seconds with no manifest
-  or index writes — used by the session-end Stop hook to auto-preserve findings. Accepts inline
-  named-vault routing like "@research save this" via the shared Config Resolution Protocol.
+  Turn the current conversation or finding into a structured permanent wiki note. Use for save/capture/preserve requests; QUICK MODE writes a fast _raw/ note. Supports named-vault routing such as @research save this. This captures current discussion, not external source ingestion.
 ---
 
 # Wiki Capture — Conversation to Wiki Note
 
 You are preserving knowledge from the current conversation as a permanent wiki note. The goal is to extract the *substance* — the knowledge itself — not a summary of what was said.
 
-This skill has two modes:
+**Writing profile:** Before drafting or rewriting natural-language Markdown in any mode, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+`WRITING.md` preferences apply only to newly drafted or rewritten natural-language Markdown; preserve source content and structured records.
+
+This skill has three modes:
 
 - **Full mode (default)** — classify the content and write a finished, cross-linked wiki page directly into the right category. This is the rest of this document (Steps 1–7).
 - **Quick mode (`--quick`)** — zero-friction staging: drop findings to `_raw/` in under 60 seconds with no manifest/index/log/QMD writes. Used for mid-session capture and by the session-end Stop hook. See below, then stop — do **not** run the full-mode steps.
+- **Correction mode (`--correction`)** — capture one atomic correction as derived knowledge while leaving the immutable conversation/source untouched. Use the template below, then update only the derived consumers and tracking links.
 
 ## Quick Mode (`--quick`)
 
@@ -28,6 +24,8 @@ Trigger when invoked as `/wiki-capture --quick`, by "quick capture" / "capture t
 **Speed contract:** Inline only. No subagents. No QMD. No manifest/`index.md`/`log.md`/`hot.md` writes. Target: <60 seconds. Promotion to full wiki pages happens later via `/wiki-ingest`.
 
 1. **Resolve config** (Config Resolution Protocol in `llm-wiki/SKILL.md`): get `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_RAW_DIR` (default: `$OBSIDIAN_VAULT_PATH/_raw`). Ensure `$OBSIDIAN_RAW_DIR` exists; create it if not.
+
+   Capture does not independently reinterpret validator schema inputs. When `OBSIDIAN_ALLOWED_LIFECYCLES`, `OBSIDIAN_ALLOWED_RELATIONSHIP_TYPES`, `OBSIDIAN_REQUIRED_TRUST_FIELDS`, or `OBSIDIAN_SCHEMA_SOURCE` is present, preserve it for the downstream lint/trust consumer: CLI values take precedence over environment/config values, which take precedence over framework defaults, and explicit blank or whitespace-only values fail closed. Omit a variable to use defaults.
 
 2. **Gate — KEEP or SKIP?** Before extracting, judge whether this session has capture value. This keeps the skill safe to call automatically without spamming `_raw/`.
    - **SKIP** (exit with "Nothing worth capturing in this session.") if ALL are true: the conversation is purely conversational (planning/Q&A/explanation) with no implementation; no errors, debugging, or problem-solving visible; nothing surprising or undocumented; every finding is already obvious from the docs.
@@ -52,11 +50,51 @@ Trigger when invoked as `/wiki-capture --quick`, by "quick capture" / "capture t
 
 ---
 
+## Correction Mode (`--correction`)
+
+Use this mode when a user or stronger authority corrects a claim derived from an immutable conversation, tool result, or other raw source. Never edit or copy the raw source. Resolve config, read the vault `AGENTS.md`, and update an existing derived page when one owns the claim; otherwise create the smallest owner-compliant derived correction page.
+
+Record exactly one atomic claim pair. `speaker_type` is semantic and must be assessed independently of a serialized message `role` (a tool result may be serialized as `role=user`). Do not include raw transcript excerpts.
+
+```yaml
+correction_id: <stable-id>
+source_locator: <immutable file:line or channel/thread/timestamp>
+source_text_sha256: <64 lowercase hex chars>
+serialized_role: <source role, if present>
+speaker_type: user | assistant | teammate | tool_result | slack_member
+original_claim:
+  subject: <exact entity or capability>
+  assertion: <single atomic value>
+corrected_claim:
+  subject: <same exact entity or capability>
+  assertion: <single atomic value or null>
+authority_class: contract | decision | code | test | deploy | runtime | db | narrative
+verification_state: verified | inferred | unverified | contradicted
+asserted_at: <ISO-8601 timestamp>
+effective_at: <ISO-8601 timestamp or null>
+as_of: <ISO-8601 timestamp>
+supersedes: [<original-claim-id>]
+consumer_propagation:
+  kw: open | not_applicable | complete
+  ob: open | not_applicable | complete
+  requirements: open | not_applicable | complete
+  code: open | not_applicable | complete
+  tests: open | not_applicable | complete
+  ai_memory: open | not_applicable | complete
+corrected_at: <ISO-8601 timestamp>
+```
+
+Before any derived write, compute `source_pre_sha256` directly from the immutable source and require it to equal `source_text_sha256`. After writing the correction and updating derived consumers, recompute `source_post_sha256` from the same locator. Abort and report an immutability violation unless `source_pre_sha256 == source_post_sha256 == source_text_sha256`. This verification is mandatory even when the correction write succeeds.
+
+After writing the derived correction, link the immutable source to the created/updated page through `.manifest.json`, append only the correction ID and affected-page counts to `log.md`, and propagate the atomic correction to every consumer independently. Mark a consumer `complete` only after verifying that consumer; do not collapse mixed results into a single aggregate status. Keep secrets, raw excerpts, and source copies out of the correction record.
+
+---
+
 ## Full Mode
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_LINK_FORMAT` (default: `wikilink`).
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_LINK_FORMAT` (default: `wikilink`).
 2. Read `$OBSIDIAN_VAULT_PATH/index.md` to understand existing wiki content (avoid duplicates)
 3. Read `$OBSIDIAN_VAULT_PATH/hot.md` if it exists — it gives context on recent activity
 
@@ -226,16 +264,69 @@ Body structure by type:
 
 Every note must link to at least 2 existing wiki pages. Search `index.md` before writing. If fewer than 2 related pages exist, create minimal stubs for the most important concepts referenced.
 
+## Step 5b: Update the Owner Profile and Todo Index
+
+The memory surface is only as good as what gets written into it. This is the step
+that keeps it alive — without it the profile stays empty and the session recap has
+nothing to inject.
+
+**Durable facts about the person.** If the conversation revealed something stable
+about how the user works — their stack, their conventions, their constraints,
+their timezone — record it:
+
+```bash
+obsidian-wiki memory profile set <key> "<value>" --confidence 0.85 --source "session:<date>"
+```
+
+Apply the same KEEP/SKIP discipline as Step 1, and one extra rule that matters more:
+
+- **Only what the user actually told you**, directly or by clear demonstration.
+  Never infer a durable fact about a person from a document that was ingested —
+  that is the document's content and belongs on a page, not in their profile.
+- **Stable, not incidental.** "Uses Postgres" is a fact. "Ran a migration today"
+  is an event; that belongs in the log.
+- **Calibrate the confidence.** Stated outright is ~0.9. Demonstrated repeatedly
+  is ~0.75. Inferred from one session's behaviour is ~0.5 — and if you are below
+  0.5, do not write it at all.
+- **Correct, don't duplicate.** `profile set` replaces an existing key, so
+  updating a changed fact is the same command.
+
+**Open threads.** If the conversation left work unfinished, record it so the next
+session picks it up:
+
+```bash
+obsidian-wiki memory todo add "<the open thread>" --origin "<page or project>"
+```
+
+Re-adding an open thread with the same text touches it rather than duplicating,
+so this is safe to call when you are unsure whether it already exists. If the
+conversation *closed* a thread that is already listed, close it:
+
+```bash
+obsidian-wiki memory todo list --vault "$OBSIDIAN_VAULT_PATH"
+obsidian-wiki memory todo done <id>
+```
+
+Never close a thread the user did not actually finish. Staleness is reported by
+the tooling; it is not your job to tidy the list.
+
+**In quick mode**, do this step but skip Step 6 — profile and todo writes are
+cheap, locked, and are the whole point of capturing.
+
 ## Step 6: Update Tracking Files
 
-**`index.md`** — Add the new page under its category section.
 
-**`log.md`** — Append:
-```
-- [TIMESTAMP] CAPTURE type=<type> page="<path>" title="<title>"
+One locked call updates all three:
+
+```bash
+obsidian-wiki memory sync CAPTURE \
+  type=<type> page="<path>" title="<title>" \
+  --takeaways "<what this capture changes about the picture, if anything>"
 ```
 
-**`hot.md`** — Update **Recent Activity** with what was just captured. Update **Key Takeaways** if the note introduced something worth flagging. Update `updated` timestamp.
+Never hand-edit `index.md`, `log.md`, or `hot.md` — see
+`.skills/llm-wiki/references/MEMORY.md`. Omit `--takeaways` when the capture
+does not shift the overall picture; the previous takeaways carry across.
 
 ## Step 7: Confirm to User
 

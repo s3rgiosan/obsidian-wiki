@@ -38,6 +38,13 @@ dependencies = []
 ast = ["tree-sitter>=0.21", "tree-sitter-languages>=1.10"]
 # Higher-fidelity community detection (Leiden algorithm; greedy label propagation is the default fallback).
 graph = ["leidenalg>=0.10", "igraph>=0.11"]
+# HTTP + MCP memory server (obsidian_wiki/server.py). The core wheel stays dependency-free.
+# mcp needs Python >=3.10; the marker keeps uv's cross-version resolver solvable.
+server = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "mcp>=2.0; python_version >= '3.10'",
+]
 
 [project.urls]
 Homepage = "https://github.com/Ar9av/obsidian-wiki"
@@ -46,6 +53,10 @@ Issues = "https://github.com/Ar9av/obsidian-wiki/issues"
 
 [project.scripts]
 obsidian-wiki = "obsidian_wiki.cli:main"
+
+# Test-only; `uv sync` installs it, so `uv run pytest tests/ -q` needs no extra flags.
+[dependency-groups]
+dev = ["pytest"]
 
 # Version is derived from the git tag (CalVer, e.g. v2026.05.2 -> 2026.5.2),
 # matching the repo's release tags. Tagging a release is the version bump.
@@ -73,6 +84,7 @@ exclude = [
 ".skills" = "obsidian_wiki/_data/skills"
 "scripts" = "obsidian_wiki/_data/scripts"
 ".claude/hooks/wiki-stop-capture.sh" = "obsidian_wiki/_data/hooks/wiki-stop-capture.sh"
+".claude/hooks/wiki-session-recap.sh" = "obsidian_wiki/_data/hooks/wiki-session-recap.sh"
 ".env.example" = "obsidian_wiki/_data/.env.example"
 "AGENTS.md" = "obsidian_wiki/_data/bootstrap/AGENTS.md"
 ".cursor/rules/obsidian-wiki.mdc" = "obsidian_wiki/_data/bootstrap/cursor/rules/obsidian-wiki.mdc"
@@ -81,6 +93,14 @@ exclude = [
 ".agent/rules/obsidian-wiki.md" = "obsidian_wiki/_data/bootstrap/agent/rules/obsidian-wiki.md"
 ".agent/workflows/obsidian-wiki.md" = "obsidian_wiki/_data/bootstrap/agent/workflows/obsidian-wiki.md"
 ".github/copilot-instructions.md" = "obsidian_wiki/_data/bootstrap/github/copilot-instructions.md"
+# The Chrome extension is loaded unpacked from a directory, so shipping it in
+# the wheel gives pip users a path to point Chrome at. `obsidian-wiki info`
+# prints it.
+#
+# NOTE: force-include ignores both .gitignore and the exclude lists above —
+# every file in this directory ships. Keep nothing local-only or secret in it;
+# the extension's private signing key lives at ~/.obsidian-wiki/, not here.
+"extensions/brain" = "obsidian_wiki/_data/extension"
 
 [tool.hatch.build.targets.sdist]
 # Prune build noise and the committed agent symlink mirrors (the CLI
@@ -104,4 +124,6 @@ exclude = [
 # nothing to copy and the published package ships a dangling hook reference.
 [tool.hatch.build.targets.sdist.force-include]
 ".skills" = ".skills"
+"extensions/brain" = "extensions/brain"
 ".claude/hooks/wiki-stop-capture.sh" = ".claude/hooks/wiki-stop-capture.sh"
+".claude/hooks/wiki-session-recap.sh" = ".claude/hooks/wiki-session-recap.sh"

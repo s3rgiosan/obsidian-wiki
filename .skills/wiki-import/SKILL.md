@@ -1,11 +1,7 @@
 ---
 name: wiki-import
 description: >
-  Import a wiki knowledge graph into the current vault — either from a graph.json export
-  file (stubs) or from an OKF (Open Knowledge Format) markdown bundle (full page bodies).
-  Use this skill when the user says "import wiki", "import from export", "load graph.json",
-  "import vault", "import OKF bundle", "import OKF", "load OKF", "import markdown bundle",
-  "/wiki-import", or wants to transfer pages from one vault to another using the output of wiki-export.
+  Import a wiki graph into the current vault from graph.json or an OKF/markdown bundle. Use for transferring previously exported wiki content between vaults; pair with wiki-export for the reverse direction.
 ---
 
 # Wiki Import — Reconstruct Pages from an Export
@@ -19,7 +15,10 @@ Either way, the import writes pages with correct frontmatter and wikilinks, then
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH`.
+**Writing profile:** Before drafting or rewriting natural-language Markdown, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+Preserve imported source prose; apply `WRITING.md` preferences only to newly generated metadata or stubs.
+
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH`.
 2. Read `$OBSIDIAN_VAULT_PATH/AGENTS.md` if it exists — apply any owner-specific conventions.
 
 ## Step 1: Locate and Detect Source Type
@@ -31,7 +30,7 @@ Either way, the import writes pages with correct frontmatter and wikilinks, then
 
 **Detect the source type:**
 - The path is a **file ending in `.json`** → **graph.json import** (validate below, then Step 3 + Step 4-Graph).
-- The path is a **directory** containing `.md` files with OKF frontmatter (a `type:` key), and/or a root `index.md` with `okf_version` → **OKF bundle import** (skip Step 3; go to Step 4-OKF).
+- The path is a **directory** containing `.md` files with OKF frontmatter (a `type:` key), and/or a root `index.md` with `okf_version` → **OKF bundle import** (skip Step 3; go to Step 4-OKF). Both `okf_version` 0.1 and 0.2 bundles are accepted; Step 4-OKF reads either.
 - Anything else → report what's wrong and stop.
 
 **Validate a graph.json source:**
@@ -43,7 +42,7 @@ If validation fails, report what's wrong and stop.
 
 **Validate an OKF bundle source:**
 - Must contain at least 1 non-reserved `.md` file (i.e. not `index.md`/`log.md`) with parseable YAML frontmatter containing a non-empty `type`.
-- A `.md` with no frontmatter or no `type` is skipped (with a count), not fatal — OKF consumers are permissive (OKF §9).
+- A `.md` with no frontmatter or no `type` is skipped (with a count), not fatal — OKF consumers are permissive (OKF §11).
 
 **Show a preview before importing:**
 
@@ -174,14 +173,16 @@ Walk the bundle directory tree. For each `.md` file that is **not** a reserved f
    - `category` ← the preserved `category` extension key if present; **else** lower-case the directory prefix of the concept id (`concepts/…` → `concepts`); **else** derive from `type` (`Concept`→`concepts`, `Entity`→`entities`, `Skill`→`skills`, `Reference`→`references`, `Synthesis`→`synthesis`, `Project`→`projects`, `Journal`→`journal`).
    - `tags` ← `tags`.
    - `summary` ← `description`.
-   - `updated` ← `timestamp` (or now if absent).
+   - `updated` ← the preserved `updated` extension key if present; else `generated.at`; else a legacy v0.1 `timestamp`; else now.
    - `created` ← the preserved `created` extension key if present, else now.
-   - `sources` ← the preserved `sources` extension key if present; else `["imported from OKF bundle <bundle path>"]`. If a `resource` URL is present and not already in `sources`, add it.
-   - Carry through any other preserved extension keys verbatim (`relationships`, `lifecycle`, `tier`, `base_confidence`, …). These make the round-trip lossless.
+   - `sources` ← OKF `sources`, as a list of strings: for each entry that is a mapping, take its `resource`; keep plain strings as-is (that's how v0.1 bundles from older exports carried our native list). If the bundle has no `sources`, use `["imported from OKF bundle <bundle path>"]`. If a top-level `resource` URL is present and not already in the list, add it.
+   - `lifecycle` ← the preserved `lifecycle` extension key if present; else from `status`: `draft` → `draft`, `deprecated` → `archived`, `stable` or absent → leave `lifecycle` unset. (OKF has no equivalent of `reviewed`/`verified`/`disputed`, so only our own exports restore them, through the preserved key.)
+   - Carry through any other preserved extension keys verbatim (`relationships`, `lifecycle_changed`, `tier`, `base_confidence`, …), and the OKF-only keys `generated`, `verified`, `stale_after`, and `usage_window` so a later export doesn't lose them. These make the round-trip lossless. Treat a bare `verified` mapping as a one-element list (OKF §5.2).
+   - **Except what our own exporter derived.** Drop `generated` when `generated.by` starts with `obsidian-wiki/` (it was computed from `updated`), and drop `verified` entries whose `by` is `human:vault-owner` (computed from the source vault's trust ledger, which doesn't travel). Keeping them would add keys the source page never had. Generated or verified blocks from any other producer are kept.
 4. **Reverse-transform body links** — markdown links that point at `.md` paths become wikilinks (this restores both real cross-links and forward-references the exporter preserved per `wiki-export` Step 3.5):
-   - `[text](../concepts/transformers.md)` or `[text](/concepts/transformers.md)` → resolve the path (relative to this file's dir, or bundle-root for `/`-absolute) to a concept id → `[[concepts/transformers]]`, or `[[concepts/transformers|text]]` when `text` differs from the target's title. The target's title comes from the bundle page when it exists; otherwise compare against the last path segment.
+   - `[text](../concepts/transformers.md)` or `[text](/concepts/transformers.md)` → resolve the path (relative to this file's dir, or bundle-root for `/`-absolute) to a concept id → `[[concepts/transformers]]`, or `[[concepts/transformers|text]]` when `text` differs from the target's title. The target's title comes from the bundle page when it exists; otherwise the exporter wrote the target's id as the link text, so treat text equal to the full id (or to its last path segment) as no alias.
    - Treat the markdown target as a **file path first**: normalize the `.md` path relative to the current file, then strip the trailing `.md` from the resolved file path to recover the page id. Do not try to infer the id from directory traversal segments before resolving the full file path. This preserves round-trips for folder-note layouts like `projects/social-twitter.md` plus `projects/social-twitter/...`, where `../../social-twitter.md` must restore to `projects/social-twitter`.
-   - This applies **even when the target page is not in the bundle** — a path-form link to a not-yet-written page round-trips back to a dangling `[[wikilink]]` (Obsidian supports these; OKF §5.3 expects them). Do not leave it as a markdown link.
+   - This applies **even when the target page is not in the bundle** — a path-form link to a not-yet-written page round-trips back to a dangling `[[wikilink]]` (Obsidian supports these; OKF §11 forbids rejecting them). Do not leave it as a markdown link.
    - When `OBSIDIAN_LINK_FORMAT=markdown` is set in config, **keep** markdown links (just rewrite the path to be vault-relative); do not convert to wikilinks.
    - Leave external `http(s)://` links and `# Citations` sections untouched.
 5. **Write the page** using the conflict mode from Step 2:
@@ -227,29 +228,20 @@ If `.manifest.json` doesn't exist, create it with the standard structure:
 }
 ```
 
-### `index.md`
+### `index.md`, `log.md`, and `hot.md`
 
-For each **created** or **merged** page:
-- Add or update the entry under its category section using the format:
-  `- [[<id>]] — <summary or title> ( #tag1 #tag2)`
-  (Note: space before `(` — `description ( #tag)` not `description(#tag)`)
+One locked call. The index is reconciled from the pages now on disk, so every created or merged page lands under its category with the documented `( #tag)` spacing:
 
-Keep categories sorted alphabetically. Create the category section if it doesn't exist.
-
-### `log.md`
-
-Append one line:
-```
-- [<ISO timestamp>] IMPORT source="<graph.json path>" pages_created=<N> pages_skipped=<K> pages_merged=<M>
+```bash
+obsidian-wiki memory sync IMPORT \
+  source="<bundle path>" \
+  pages_created=<N> pages_skipped=<K> pages_merged=<M> \
+  --takeaways "Imported <bundle>: <what it adds to the picture>"
 ```
 
-### `hot.md`
+Omit `--takeaways` if the import does not shift the overall picture; the previous takeaways carry across. Never hand-edit `index.md`, `log.md`, or `hot.md` — the command takes the lock that keeps a parallel writer from dropping your update.
 
-Rewrite the **Recent Activity** section to include this import as the latest entry:
-```
-- [<timestamp>] IMPORT from <graph.json path> — created X, merged Z pages
-```
-Update the `updated:` frontmatter timestamp. Leave other hot.md sections (Active Threads, Key Takeaways) intact unless they reference pages that were just created — in which case add brief mentions.
+See `.skills/llm-wiki/references/MEMORY.md` for the full procedure.
 
 ## Step 6: Print Summary
 

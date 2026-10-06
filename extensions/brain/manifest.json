@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Brain",
+  "description": "Capture pages into your Obsidian brain vault, and fill web forms from it using your existing Claude Code / Codex subscription.",
+  "version": "0.2.0",
+  "action": {
+    "default_title": "Brain",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "assets/icon-16.png",
+      "48": "assets/icon-48.png",
+      "128": "assets/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "assets/icon-16.png",
+    "48": "assets/icon-48.png",
+    "128": "assets/icon-128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "activeTab",
+    "contextMenus",
+    "scripting",
+    "nativeMessaging",
+    "storage"
+  ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAviIifjDNa+37CVfNLRGcS6n4IBFKvSRRBfhJSn+8Z/NvR+jt3WU/22KlNqb+KuuhUKSnfPYxPQrlMfGe7KfWqNFdm4jx4AR99+zgEeasAAN6e//EWQU4iRlN44FnSn/jLn8wpgzFJH7Qo2oS0A9BOlyJHtIB++ZUi808YcLe2x8uDGTWP/MsYl8I+3f5kYhyZBFwf6mAAy5glTgnaOlhpWY7HE4e29TG9EAwhNeyjv/HPDmFWdX3LLgvXkVoDjZM3W+x/bpqG88w+XTVbEX7P7lV+j028gXDZBJOhvnn3VbU9IKfVGKOkUmhL+zYDDsBX5ObdtlNSvuYqaRqBgKIGQIDAQAB"
+}

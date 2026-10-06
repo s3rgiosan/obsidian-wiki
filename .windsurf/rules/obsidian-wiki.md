@@ -9,7 +9,7 @@ This project is a **skill-based framework** for building and maintaining an Obsi
 
 ## Quick Orientation
 
-1. Resolve config via `AGENTS.md`: honor an inline `@name` vault override first, then `.env`, then `~/.obsidian-wiki/config`. This gives `OBSIDIAN_VAULT_PATH` — where the wiki lives.
+1. Resolve config via `AGENTS.md`: honor an inline `@name` vault override first, then `.env`, then the global config (`~/.config/obsidian-wiki/config`, XDG-style; legacy `~/.obsidian-wiki/config` still honored). This gives `OBSIDIAN_VAULT_PATH` — where the wiki lives.
 2. Read `.manifest.json` at the vault root to see what's already been ingested.
 3. Skills are in `.skills/` (also at `.windsurf/skills/`). Each subfolder has a `SKILL.md`.
 
@@ -19,7 +19,7 @@ This project is a **skill-based framework** for building and maintaining an Obsi
 |---|---|
 | "set up my wiki" / "initialize" | `.skills/wiki-setup/SKILL.md` |
 | "ingest" / "add this to the wiki" / "process this export" / "ingest this data" | `.skills/wiki-ingest/SKILL.md` |
-| "/wiki-history-ingest claude" / "/wiki-history-ingest codex" / "/wiki-history-ingest pi" | `.skills/wiki-history-ingest/SKILL.md` |
+| "/wiki-history-ingest claude" / "/wiki-history-ingest copilot" / "/wiki-history-ingest codex" / "/wiki-history-ingest hermes" / "/wiki-history-ingest openclaw" / "/wiki-history-ingest pi" | `.skills/wiki-history-ingest/SKILL.md` |
 | "import my Claude history" | `.skills/claude-history-ingest/SKILL.md` |
 | "import my Codex history" | `.skills/codex-history-ingest/SKILL.md` |
 | "import my Pi history" | `.skills/pi-history-ingest/SKILL.md` |

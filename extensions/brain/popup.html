@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Brain Vault</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero" aria-label="Brain vault">
+        <img class="brain-mark" src="assets/obsidian-brain.png" alt="" aria-hidden="true">
+        <div>
+          <p class="eyebrow">Obsidian Wiki</p>
+          <p id="lede" class="lede">Turn this page into raw memory.</p>
+        </div>
+      </section>
+
+      <div class="tabs" role="tablist">
+        <button id="tabCapture" class="tab is-active" type="button" role="tab" aria-selected="true" aria-controls="paneCapture">Capture</button>
+        <button id="tabFill" class="tab" type="button" role="tab" aria-selected="false" aria-controls="paneFill">Fill form</button>
+      </div>
+
+      <!-- ── Capture ───────────────────────────────────────────────────── -->
+      <section id="paneCapture" role="tabpanel" aria-labelledby="tabCapture">
+        <section class="target-card">
+          <div>
+            <div class="label-row">
+              <p class="label">Capture target</p>
+              <button id="pathHelp" class="help-button" type="button" aria-label="Show command to find raw vault path">?</button>
+            </div>
+            <p id="folderStatus" class="folder-status">No _raw folder selected</p>
+          </div>
+          <button id="chooseFolder" class="secondary" type="button">Choose vault/_raw</button>
+        </section>
+
+        <section id="pathPanel" class="path-panel" hidden>
+          <div class="path-panel-header">
+            <p>Run from anywhere inside this repo</p>
+            <span id="copyStatus">Copied</span>
+          </div>
+          <code id="pathCommand"></code>
+        </section>
+
+        <label class="field">
+          <span>Paste blurb here</span>
+          <textarea id="note" rows="3" placeholder="Add your short context, summary, or why this matters."></textarea>
+        </label>
+
+        <button id="capture" class="primary" type="button">
+          <span class="pulse" aria-hidden="true"></span>
+          Capture current page
+        </button>
+      </section>
+
+      <!-- ── Fill ──────────────────────────────────────────────────────── -->
+      <section id="paneFill" role="tabpanel" aria-labelledby="tabFill" hidden>
+        <section class="target-card">
+          <div>
+            <p class="label">Answer from</p>
+            <p id="vaultStatus" class="folder-status">Default vault</p>
+          </div>
+          <select id="vault" class="secondary">
+            <option value="">Default vault</option>
+          </select>
+        </section>
+
+        <section class="target-card">
+          <div>
+            <p class="label">Reasoning engine</p>
+            <p class="folder-status">Runs on your existing subscription.</p>
+          </div>
+          <select id="engine" class="secondary">
+            <option value="claude">Claude Code</option>
+            <option value="codex">Codex</option>
+          </select>
+        </section>
+
+        <p class="hint">Reads this page's form, answers what your vault supports, and leaves the rest blank. Never submits.</p>
+
+        <button id="fill" class="primary" type="button">
+          <span class="pulse" aria-hidden="true"></span>
+          Fill from brain
+        </button>
+
+        <ul id="results" class="results"></ul>
+      </section>
+
+      <p id="status" class="status" role="status"></p>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

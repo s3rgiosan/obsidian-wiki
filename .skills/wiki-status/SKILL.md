@@ -1,13 +1,7 @@
 ---
 name: wiki-status
 description: >
-  Show the current state of the wiki — what's been ingested, what's pending, and the delta between sources
-  and wiki content. Use this skill when the user asks "what's the status", "how much is ingested",
-  "what's left to process", "show me the delta", "what changed since last ingest", "wiki dashboard",
-  or wants an overview of their knowledge base health and completeness. Also use before deciding whether
-  to append or rebuild. Includes an insights mode triggered by "wiki insights", "what's central",
-  "show me the hubs", "central pages", "what's connected", "wiki structure" — analyzes the shape of
-  the wiki itself to surface top hubs, cross-domain bridges, and orphan-adjacent pages.
+  Report wiki ingestion/completeness state, pending source delta, structural insights, or maintenance equilibrium. Use for remaining-work/status questions, hubs and bridges, or whether maintenance skills still have pending changes. wiki-digest summarizes learned knowledge instead.
 ---
 
 # Wiki Status — Audit & Delta
@@ -16,21 +10,24 @@ You are computing the current state of the wiki: what's been ingested, what's ne
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH`, `OBSIDIAN_SOURCES_DIR`, `CLAUDE_HISTORY_PATH`, and `CODEX_HISTORY_PATH`.
+**Writing profile:** Before drafting or rewriting natural-language Markdown, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+Apply `WRITING.md` preferences only to generated `_insights.md` prose; keep the analyser snapshot verbatim.
+
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH`, `OBSIDIAN_SOURCES_DIR`, `CLAUDE_HISTORY_PATH`, and `CODEX_HISTORY_PATH`.
 2. Read `.manifest.json` at the vault root — this is the ingest tracking ledger
 
 ## The Manifest
 
 The manifest lives at `$OBSIDIAN_VAULT_PATH/.manifest.json`. It tracks every source file that has been ingested. If it doesn't exist, this is a fresh vault with nothing ingested.
 
-> **Source keys are canonical absolute paths** (`~` and env vars expanded). Never mix `~`-relative and absolute keys — the same file would be tracked twice and re-ingested. See `llm-wiki/SKILL.md` → `.manifest.json`. Repair a mixed manifest with `scripts/manifest.py normalize <vault>`.
+> **Source keys are portable — never bare absolute paths.** The canonical key is vault-relative for in-vault sources (`Raw/database/x.pdf`), `~`-relative for sources under `$HOME` (`~/.claude/projects/.../abc.jsonl`), or a pseudo-key (`repo:`/`url:`/`agent:`) for sources with no portable path form. Never mix forms — the same file would be tracked twice and re-ingested. See `llm-wiki/SKILL.md` → `.manifest.json` (Source key contract v2). Convert a legacy absolute-key manifest with `scripts/manifest.py migrate <vault>`.
 
 ```json
 {
   "version": 1,
   "last_updated": "2026-04-06T10:30:00Z",
   "sources": {
-    "/absolute/path/to/file.md": {
+    "Raw/papers/attention.pdf": {
       "ingested_at": "2026-04-06T10:30:00Z",
       "size_bytes": 4523,
       "modified_at": "2026-04-05T08:00:00Z",
@@ -39,7 +36,7 @@ The manifest lives at `$OBSIDIAN_VAULT_PATH/.manifest.json`. It tracks every sou
       "pages_created": ["concepts/transformers.md"],
       "pages_updated": ["entities/vaswani.md"]
     },
-    "$CLAUDE_HISTORY_PATH/projects/-Users-name-my-app/abc123.jsonl": {
+    "~/.claude/projects/-Users-name-my-app/abc123.jsonl": {
       "ingested_at": "2026-04-06T11:00:00Z",
       "size_bytes": 128000,
       "modified_at": "2026-04-06T09:00:00Z",
@@ -51,7 +48,8 @@ The manifest lives at `$OBSIDIAN_VAULT_PATH/.manifest.json`. It tracks every sou
   },
   "projects": {
     "my-app": {
-      "source_path": "$CLAUDE_HISTORY_PATH/projects/-Users-name-my-app",
+      "source_repo": "github.com/owner/my-app",
+      "source_cwd_hint": "~/.claude/projects/-Users-name-my-app",
       "vault_path": "projects/my-app",
       "last_ingested": "2026-04-06T11:00:00Z",
       "conversations_ingested": 5,
@@ -108,7 +106,8 @@ Compare current sources against the manifest. Classify each source file:
 | **Modified** | File in manifest, hash differs from `content_hash` | Needs re-ingesting |
 | **Touched** | File in manifest, mtime newer but hash unchanged | Skip — content identical, no re-ingest needed |
 | **Unchanged** | File in manifest, mtime and hash both match | Nothing to do |
-| **Deleted** | In manifest, but file no longer exists on disk | Note it — wiki pages may be stale |
+| **Deleted** | Vault-local source in the manifest, but the file no longer exists on disk | Note it — wiki pages may be stale |
+| **Unavailable** | Machine-local source (home-relative or absolute key) absent on this machine — e.g. a synced entry from another host | Skip — do not report as deleted or clean up; it may exist on the machine that ingested it |
 
 When a manifest entry has no `content_hash` (older entry), fall back to mtime comparison only.
 
@@ -150,7 +149,7 @@ Present a clear summary:
 | Source | Type | Size |
 |---|---|---|
 | ~/Documents/research/new-paper.pdf | document | 2.1 MB |
-| $CLAUDE_HISTORY_PATH/projects/-Users-.../session-xyz.jsonl | claude_conversation | 340 KB |
+| ~/.claude/projects/-Users-.../session-xyz.jsonl | claude_conversation | 340 KB |
 | ~/.codex/sessions/2026/04/12/rollout-...jsonl | codex_rollout | 220 KB |
 | ... | | |
 
@@ -289,18 +288,27 @@ Where the delta report tells the user what's pending, insights mode tells them w
 **First, run the graph analyser.** This replaces manual wikilink parsing — one command produces all the raw data you need:
 
 ```bash
-obsidian-wiki graph-analyse "$OBSIDIAN_VAULT_PATH" --pretty
+obsidian-wiki graph-analyse "$OBSIDIAN_VAULT_PATH" --pretty --snapshot \
+  --diff-against "$OBSIDIAN_VAULT_PATH/_insights.md"   # omit if no previous _insights.md
 ```
 
+The analyser runs the same algorithm family graphify applies to code graphs, in pure Python: degree ranking, community detection (Leiden if `obsidian-wiki[graph]` is installed, else label propagation), community cohesion, Brandes betweenness centrality, cross-community surprise scoring, and snapshot diffing. Vault bookkeeping files (`index`, `log`, `hot`, `_insights`, `_meta/`, `_readouts/`) are excluded so they don't dominate every ranking.
+
 Output fields used below:
-- `god_nodes` — pages ranked by total degree (in + out). Use for anchor pages and hub classification.
-- `communities` — page clusters by link density (label propagation / Leiden). Use for bridge detection and cluster labelling.
-- `surprising_connections` — cross-community edges ranked by unexpectedness. Use directly in the Surprising Connections section.
+- `god_nodes` — pages ranked by total degree (in + out), with `in_degree`/`out_degree`. Use for anchor pages and hub classification.
+- `bridges` — pages ranked by **betweenness centrality** (share of shortest paths passing through them), with `community` and the list of other communities they `connects`. Use directly for the Bridge Pages section — no manual tag-pair search needed.
+- `communities` — page clusters by link density, each with `label`, `size`, `pages`, and `cohesion` (intra-cluster edge density, 0–1). Use for cluster labelling and the cohesion section.
+- `surprising_connections` — cross-community edges ranked by unexpectedness, one per community pair before any pair repeats, each with a `note` naming the two communities. Use directly in the Surprising Connections section.
+- `suggested_questions` — `{type, question, why}` derived from bridges, sink hubs, isolates and low-cohesion clusters. Seed the Questions section with these.
 - `dead_ends` — pages with zero outgoing links. Use for orphan-adjacent and cross-linker suggestions.
 - `isolated` — pages with zero links in either direction. Use for stubs/orphan reporting.
-- `stats` — total pages, edges, communities.
+- `stats` — total pages, edges, communities, graph `density`.
+- `diff` (only with `--diff-against`) — `added_pages`, `removed_pages`, `added_edges`, `removed_edges`, `newly_connected`, `lost_incoming`, `summary`. Use for the Graph Delta section.
+- `snapshot` (only with `--snapshot`) — write this JSON verbatim into the `<!-- GRAPH_SNAPSHOT: ... -->` comment at the end of `_insights.md`.
 
-**Fallback** (if `obsidian-wiki` is not installed): glob all `.md` pages, extract every `[[wikilink]]`, and build `incoming`, `outgoing`, and `tags` maps manually.
+Query modes (useful when the user asks a follow-up): `--path A B` returns the shortest link chain between two pages; `--around PAGE --depth N [--direction in|out|both]` returns the N-hop neighbourhood (`--direction in` = the blast radius if PAGE were renamed or removed).
+
+**Fallback** (if `obsidian-wiki` is not installed): glob all `.md` pages, extract every `[[wikilink]]`, and build `incoming`, `outgoing`, and `tags` maps manually, then approximate the sections below by hand.
 
 You'll reuse this data across all sections below.
 
@@ -311,39 +319,33 @@ You'll reuse this data across all sections below.
    - For each, note both incoming and outgoing counts: pages with high incoming *and* high outgoing are connector hubs (most valuable)
    - Pages with high incoming but zero outgoing are sink hubs — flag as cross-linker candidates
 
-2. **Bridge pages.** Pages that connect otherwise-disconnected tag clusters — removing them would partition the graph. These are often more structurally important than raw hub count suggests.
-   - For each page P, find pairs of pages (A, B) where:
-     - A links to P, B is linked from P (or vice versa)
-     - A and B share **no tags** with each other
-     - P is the only path between A's tag cluster and B's tag cluster within 2 hops
-   - Rank by how many cross-cluster pairs P bridges; show top 5
-   - Label each: "`P` bridges `[tag-cluster-A]` ↔ `[tag-cluster-B]`"
+2. **Bridge pages.** Pages that connect otherwise-disconnected clusters — removing them would partition the graph. These are often more structurally important than raw hub count suggests.
+   - Take the top 5 of `bridges` (already ranked by betweenness centrality)
+   - Label each using the community labels: "`P` bridges `[label of community]` ↔ `[labels of connects]`". A bridge with an empty `connects` list is an *intra*-cluster chokepoint — note it as "internal hub of `[label]`"
+   - Show the betweenness score so runs are comparable over time
 
-3. **Tag cluster cohesion.** For each tag with ≥ 5 pages, score how tightly the pages within it are interconnected:
-   - `n` = number of pages sharing this tag
-   - `actual_links` = number of wikilinks between any two pages in this tag group
-   - `cohesion = actual_links / (n × (n−1) / 2)` — ratio of actual links to maximum possible
-   - **Fragmented clusters** (cohesion < 0.15, n ≥ 5): these pages share a topic but aren't woven together. Surface them as cross-linker targets.
-   - Show top 5 tags by cohesion (strongest clusters) and bottom 5 (most fragmented)
+3. **Cluster cohesion.** How tightly each community's pages are interlinked — read straight from `communities[].cohesion` (`actual_links / (n × (n−1) / 2)`).
+   - **Fragmented clusters** (cohesion < 0.15, size ≥ 5): these pages share a topic but aren't woven together. Surface them as cross-linker targets.
+   - Show the top 5 communities by cohesion (strongest clusters) and bottom 5 (most fragmented), each with its label and size
+   - Optionally repeat the same formula per tag (for tags with ≥ 5 pages) if the user cares about tag-level cohesion
 
-4. **Surprising connections.** Cross-category wikilinks that are non-obvious — scored by how unexpected they are:
-   - Score each wikilink that crosses category boundaries (e.g., `concepts/` → `entities/`, `skills/` → `synthesis/`):
+4. **Surprising connections.** Cross-community wikilinks that are non-obvious.
+   - Start from `surprising_connections` (structural score = 1/√(cross-degree(A)·cross-degree(B)); one edge per community pair before any pair repeats, so a single hub can't fill the list)
+   - Re-rank the candidates with content signals the analyser can't see:
      - **+3** if the linking page or claim is marked `^[ambiguous]` (uncertain connection, worth reviewing)
      - **+2** if the linking page is marked `^[inferred]` (synthesized, not directly stated)
      - **+2** if the categories are in different knowledge layers (e.g., `concepts` ↔ `entities` more surprising than `concepts` ↔ `concepts`)
-     - **+2** if source page has ≤ 2 total links (peripheral) but target has ≥ 8 (hub) — unexpected reach from edge to center
-   - Show top 5 scored connections with a plain-language reason for each
+   - Show top 5 with a plain-language reason for each (use the `note` — "bridges `[label A]` → `[label B]`" — plus any content bonus)
 
 5. **Orphan-adjacent suggestions.** Pages linked from a top-10 hub but with zero outgoing links of their own. Dead-ends in high-traffic areas — prime cross-linker candidates.
 
 6. **Rough clusters.** Group anchor pages by dominant tag. (Simple tag intersection — just for orientation.)
 
-7. **Graph delta since last run.** Compare the current link graph to the snapshot stored in the previous `_insights.md`:
-   - Read the `<!-- GRAPH_SNAPSHOT: ... -->` line at the bottom of the previous `_insights.md` (if it exists) — it contains a compact JSON edge list
-   - Compute: new pages added, pages removed, new wikilinks created, wikilinks removed
-   - Flag: pages that were isolated last run but now have incoming links ("newly connected: X, Y")
-   - Flag: pages that lost incoming links since last run ("link target may have been renamed: A, B")
-   - If no previous snapshot exists, skip this section
+7. **Graph delta since last run.** Read straight from the `diff` field (produced by `--diff-against` on the previous `_insights.md`, which the analyser reads from its `<!-- GRAPH_SNAPSHOT: ... -->` comment):
+   - `summary` → "+N pages, +M wikilinks"; list `added_pages` / `removed_pages`
+   - `newly_connected` → "newly connected: X, Y" (pages that had no incoming links last run)
+   - `lost_incoming` → "link target may have been renamed: A, B"
+   - If no previous snapshot exists (no `diff` field), skip this section
 
 8. **Tier assignment suggestions.** After computing hubs and bridges, recommend `tier:` changes. Never write `tier:` to pages — only surface suggestions so the human can decide.
    - **Promote to `core`:** pages with ≥5 incoming links OR top-5 bridge position that currently have `tier: supporting` or no `tier:` field
@@ -358,17 +360,15 @@ You'll reuse this data across all sections below.
    - If all high-link pages already have `tier: core` and all low-link pages have `tier: peripheral`, emit: "Tier assignments look healthy — no changes suggested."
 
 9. **Suggested questions.** Questions this wiki structure is uniquely positioned to answer — or that reveal gaps:
-   - From `^[ambiguous]` claims: "Resolve: What is the exact relationship between `X` and `Y`?"
-   - From bridge pages: "Explore: Why does `P` connect `[cluster-A]` to `[cluster-B]`?"
-   - From pages with zero incoming links: "Link: `X` has no incoming links — what should reference it?"
-   - From fragmented clusters (cohesion < 0.15): "Audit: Should tag `[T]` be split into more focused sub-tags?"
-   - Show up to 7, prioritizing AMBIGUOUS first, then bridge nodes, then isolates
+   - From `^[ambiguous]` claims (content scan — the analyser doesn't see these): "Resolve: What is the exact relationship between `X` and `Y`?"
+   - From `suggested_questions` — already generated for you: `bridge_node` → "Explore: …", `sink_hub` → "Link: …", `isolated_nodes` → "Link: …", `low_cohesion` → "Audit: …". Rewrite each into the matching prefix form
+   - Show up to 7, prioritizing AMBIGUOUS first, then bridge nodes, then sink hubs / isolates, then cohesion audits
 
 ---
 
 ### Output
 
-Write the result to `_insights.md` at the vault root. Overwrite freely — it's regenerable. At the very end, embed a compact graph snapshot as an HTML comment so the next run can diff against it.
+Write the result to `_insights.md` at the vault root. Overwrite freely — it's regenerable. At the very end, embed the analyser's `snapshot` field verbatim as an HTML comment so the next run can diff against it with `--diff-against`.
 
 ```markdown
 # Wiki Insights — <TIMESTAMP>
@@ -430,6 +430,81 @@ After writing the file, append to `log.md`:
 
 - Vaults with fewer than 20 pages — not enough graph structure. Tell the user and skip.
 - After a fresh `wiki-rebuild` — wait until at least one ingest has happened.
+
+## Equilibrium Mode
+
+Triggered when the user asks "is my vault at equilibrium", "wiki equilibrium", "is the vault converged", "is maintenance done", "are my skills fighting", or "what's still pending across all the maintenance skills".
+
+The maintenance skills are **players in a game over one shared vault**. Each has a move set (lint fixes, dedup merges, new links, tag normalizations) and each judges the vault by its own objective. The vault is at **equilibrium** when no player has a profitable deviation — every audit pass proposes zero changes. That is the real "maintenance is done" signal, and it is stronger than any single skill reporting clean, because skills can undo each other.
+
+This mode is **read-only over the players**: run every audit in its report-only form and never let one apply changes. It writes nothing except the snapshot line in `_insights.md`.
+
+### The players
+
+| Player | Audit-only invocation | Counts as a move |
+|---|---|---|
+| `wiki-lint` | `obsidian-wiki lint "$OBSIDIAN_VAULT_PATH" --json` | each finding in `findings` (sum the `stats.findings` counts) |
+| `wiki-dedup` | audit mode (no `--merge`, no `--auto`) | each HIGH or MEDIUM duplicate pair |
+| `cross-linker` | audit pass only — report proposed links, insert none | each unlinked mention it would link |
+| `tag-taxonomy` | Step 1 audit only — report drift, normalize nothing | each tag it would rename or drop |
+
+Only `wiki-lint` is deterministic; the other three are LLM passes, so their counts are estimates from their own reports. Say so in the output rather than implying exactness.
+
+### What to report
+
+```
+# Vault Equilibrium — <TIMESTAMP>
+
+equilibrium: no
+
+| Player | Pending moves | Top proposed move |
+|---|---|---|
+| wiki-lint | 4 | fix broken link [[concepts/old-name]] in synthesis/foo.md |
+| wiki-dedup | 1 | merge entities/gpt-4.md ← entities/gpt4.md (0.91) |
+| cross-linker | 12 | link "attention mechanism" in concepts/transformers.md |
+| tag-taxonomy | 0 | — |
+
+Deviating players: wiki-lint, wiki-dedup, cross-linker
+Converged players: tag-taxonomy
+```
+
+When every count is zero, report `equilibrium: yes` and state plainly that running any maintenance skill right now would change nothing.
+
+### Oscillation detection
+
+A player whose count keeps returning after being driven to zero means two players are **fighting** — the classic case is `tag-taxonomy` normalizing a tag that an ingest skill's defaults keep re-adding, so the vault cycles forever and never converges.
+
+Append a snapshot beside the existing `GRAPH_SNAPSHOT` in `_insights.md`:
+
+```
+<!-- EQUILIBRIUM_SNAPSHOT: {"ts":"2026-08-25T10:00:00Z","lint":4,"dedup":1,"crosslink":12,"tags":0} -->
+```
+
+Read the previous `EQUILIBRIUM_SNAPSHOT` lines (keep the last 5; drop older ones) and compare:
+- A player going `0 → N → 0 → N` across runs is **oscillating** — flag it by name and name the likely opponent (the skill whose writes reintroduce those moves).
+- A player whose count only ever grows is **losing ground** — nobody is running it.
+- No previous snapshot: report "first run, no baseline yet" and skip the comparison.
+
+Oscillation is a report, not a fix. The resolution is a human decision about which player's objective wins — usually a rule change in `_meta/taxonomy.md` or the owner's `AGENTS.md`, not another maintenance run.
+
+### Source track record
+
+Pending moves are not evenly distributed across sources. Attribute them back: for each page appearing in a player's findings, look up which manifest source produced it (`.manifest.json` → `pages_created` / `pages_produced`).
+
+When one source accounts for ≥3 issues or ≥50% of a player's pending moves, add a line:
+
+```
+Source track record:
+- ~/exports/slack-dump/ — 7 of 12 cross-linker moves, 3 of 4 lint findings.
+  Its pages consistently need repair; consider reviewing its source_quality bucket.
+```
+
+This is the repeated-game view: a source that keeps producing pages needing repair has earned a lower `source_quality`. **Report only** — never adjust `source_quality` or the trust ledger automatically. The owner decides, through the existing trust flow (`obsidian-wiki trust-record`), exactly as with every other confidence change.
+
+### When to skip
+
+- Vaults with fewer than 20 pages — the audits are noise at that size.
+- If any player's audit can't be run cleanly in report-only form, omit that row and say which player is missing rather than guessing a count.
 
 ## Notes
 

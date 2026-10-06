@@ -1,17 +1,7 @@
 ---
 name: wiki-ingest
 description: >
-  Ingest any source into the Obsidian wiki by distilling its knowledge into interconnected wiki pages.
-  Handles structured documents (PDFs, markdown, articles, papers, notes, folders), raw/unstructured
-  text (chat exports, conversation logs, Slack/Discord threads, meeting transcripts, CSV/JSON data,
-  journal entries, browser bookmarks, email archives, text dumps), AND web URLs. Use whenever the
-  user wants to add new sources to their wiki: "add this to the wiki", "process these docs", "ingest
-  this folder", "ingest this data", "process this export/logs", "import my chat history from X",
-  "/ingest-url <url>", "add this URL", "save this page", or pastes a URL and says "add this" /
-  "save this to my wiki". Also triggers when the user drops a file, or for raw mode: "process my
-  drafts", "promote my raw pages", or any reference to the _raw/ staging directory. This is the
-  general catch-all ingest skill for any document, text, or URL source not covered by a more
-  specific ingest skill (claude-history-ingest, etc.).
+  Ingest new documents, raw text, folders, or URLs into the Obsidian wiki as distilled, linked knowledge. Use for general wiki ingestion when no more specific ingest skill applies, including processing _raw/ staged content.
 ---
 
 # Obsidian Ingest — Document Distillation
@@ -20,7 +10,10 @@ You are ingesting source documents into an Obsidian wiki. Your job is not to sum
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH`, `OBSIDIAN_SOURCES_DIR`, `OBSIDIAN_LINK_FORMAT` (default: `wikilink`), and `WIKI_STAGED_WRITES`. Only read the specific variables you need — do not log, echo, or reference any other values from these files.
+**Writing profile:** Before drafting or rewriting natural-language Markdown, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+`WRITING.md` preferences apply only to newly drafted or rewritten natural-language Markdown; preserve source content and structured records.
+
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH`, `OBSIDIAN_SOURCES_DIR`, `OBSIDIAN_LINK_FORMAT` (default: `wikilink`), and `WIKI_STAGED_WRITES`. Only read the specific variables you need — do not log, echo, or reference any other values from these files.
 2. **Check `WIKI_STAGED_WRITES`** — if set to `true`, all new and updated category pages go to `_staging/<category>/` instead of their final location. Tell the user at the start of the ingest: "Staged writes mode is enabled — pages will land in `_staging/` for your review. Run `/wiki-stage-commit` when ready to promote."
 3. Read `.manifest.json` at the vault root to check what's already been ingested
 4. Read `index.md` to understand current wiki content
@@ -51,12 +44,13 @@ Only ingest sources that are **new or modified** since last ingest. Use the buil
 obsidian-wiki cache-check "$OBSIDIAN_VAULT_PATH" <source1> [source2 ...]
 ```
 
-Output: `{"new": [...], "modified": [...], "unchanged": [...], "missing": [...]}`.
+Output: `{"new": [...], "modified": [...], "unchanged": [...], "missing": [...], "unavailable": [...]}`.
 
 - `new` → ingest these
 - `modified` → re-ingest these (content changed since last run)
 - `unchanged` → skip entirely — hash matches, content is identical
-- `missing` → in manifest but no longer on disk; skip and optionally clean up
+- `missing` → vault-local source in the manifest that is no longer on disk; skip and optionally clean up
+- `unavailable` → machine-local source (home-relative or absolute key) that is absent on this machine, e.g. a synced entry from another host; skip it, do **not** treat it as missing or clean it up
 
 After ingesting each source, record its hash:
 
@@ -83,12 +77,24 @@ In raw mode, each file in `OBSIDIAN_VAULT_PATH/_raw/` (or `OBSIDIAN_RAW_DIR`) is
 
 This keeps faith with the "immutable raw layer" principle in `llm-wiki/SKILL.md`: even though `_raw/` drafts aren't Layer 1 sources, some have no other copy (e.g. a quick-capture finding typed straight into `_raw/` with no external document behind it), so the promoted file is the only record once it leaves the staging directory.
 
-**Source inheritance:** The `_raw/` path is a staging artifact — never use it as the `sources:` value on the promoted page. Derive the source entry from the `_raw/` file's own frontmatter instead:
+**Snapshot provenance:** After the move, `_raw/_archived/<filename>` (with any collision suffix) **is** the snapshot the wiki was built from. Web pages change; a clipping’s YAML `source:` / `url` is origin metadata, not the snapshot.
 
-- If the file has both `capture_source` and `sources:` fields, synthesize a combined entry:
-  `"agent:<capture_source> <sources-value>"` — e.g. `"agent:claude-session obsidian-wiki session (2026-05-29)"`
-- If the file has only `sources:`, copy those entries verbatim.
-- Only fall back to the `_raw/` filename if the file has no `sources:` or `capture_source` fields at all.
+- YAML `sources:` stays origin keys (`url:`, `agent:`, repo paths, portable file keys) — **not** the archive path.
+- After the move, record the archive on the page, then the manifest — both on the **archived** path:
+
+```bash
+obsidian-wiki snapshots set <page> --archive "_raw/_archived/<filename>"
+obsidian-wiki cache-update "$OBSIDIAN_VAULT_PATH" "_raw/_archived/<filename>" --pages <page>
+```
+
+That CLI writes YAML `snapshots:` as a quoted wikilink **list** with display text, e.g. `"[[_raw/_archived/clip|clip]]"`. Do not hand-edit `snapshots:` to Markdown `[title](path)` — Obsidian Properties only treats `"[[…]]"` as clickable links ([Properties](https://help.obsidian.md/properties)). If Properties shows a single text blob, set the property type to **List**.
+
+- Every created or updated page must end with a **Sources** section whose clickable entries may be Obsidian wikilinks to those snapshots: `[[_raw/_archived/<filename>]]`. The snapshots CLI does not touch the body.
+- Do **not** add a live URL to YAML `sources:` or to the Sources section just because the draft recorded a webpage. Optional non-link breadcrumb: *Clipped from https://…* (plain text, not a markdown/wikilink).
+- **URL exception:** link a live URL only when this ingest **fetched the network** (`/ingest-url` / `ingest-url`) and there is **no** local snapshot file. Then YAML may use `url:<canonical-url>` and the Sources section may use a markdown link to that URL.
+- Agent-session keys (`agent:…`) still apply when the only origin is a conversation, not a file. Do not invent a `_raw/` path that does not exist.
+
+The pending `_raw/` path (before archive) is staging — never leave it as YAML `sources:` on a live page.
 
 **Move safety:** Only move the specific file that was just promoted. Before moving, verify the resolved path is inside `$OBSIDIAN_VAULT_PATH/_raw/` — never touch files outside this directory. Never use wildcards or recursive operations (`rm -rf`, `mv *`). Move one file at a time by its exact path into `_raw/_archived/`, preserving its filename. If a file of the same name already exists there, append a numeric suffix rather than overwriting.
 
@@ -219,7 +225,7 @@ Research papers (arXiv/conference PDFs) carry their substance in figures, equati
 
 1. **Read the text layer** for the narrative (problem, method, claims), then **re-read the figure- and equation-dense pages with vision** (`Read pages: "N"`) — the architecture/method figure (often Figure 1) and the main results table rarely live in the text layer.
 2. **Capture the method visually — prefer the paper's real figures.**
-   - **Embed the paper's own architecture/method figure as the primary visual.** Most arXiv figures are a single embedded raster. With PyMuPDF (`fitz`): use `page.get_image_info(xrefs=True)` to find the figure's `xref` and bbox — it is usually the wide image sitting just above its caption (locate the caption with `page.search_for("Figure N")`) — then `img = doc.extract_image(xref)` and save `img["image"]` to `attachments/<slug>-figN.<ext>` using the native `img["ext"]` (it may be JPEG, not PNG — don't hardcode the extension; downscale oversized figures, e.g. `sips -Z 1800 <file>`). If the figure is vector rather than raster (`extract_image` returns nothing and `page.get_drawings()` is non-empty), render the bbox region instead: `page.get_pixmap(clip=rect, matrix=fitz.Matrix(4, 4))` — compute `rect` by unioning `get_drawings()` rects (drawings-only; text blocks pull in body text) within one column above the caption, and in multi-column papers bound the window below the previous element so adjacent tables/text aren't caught; verify the render and re-crop if needed. Embed with `![[<slug>-figN.<ext>]]` plus an italic caption.
+   - **Embed the paper's own architecture/method figure as the primary visual.** Most arXiv figures are a single embedded raster. With PyMuPDF (`import pymupdf` — the `fitz` alias is deprecated): use `page.get_image_info(xrefs=True)` to find the figure's `xref` and bbox — it is usually the wide image sitting just above its caption (locate the caption with `page.search_for("Figure N")`) — then `img = doc.extract_image(xref)` and save `img["image"]` to `attachments/<slug>-figN.<ext>` using the native `img["ext"]` (it may be JPEG, not PNG — don't hardcode the extension; downscale oversized figures, e.g. `sips -Z 1800 <file>`). If the figure is vector rather than raster (`extract_image` returns nothing and `page.get_drawings()` is non-empty), render the bbox region instead: `page.get_pixmap(clip=rect, matrix=pymupdf.Matrix(4, 4))` — compute `rect` by unioning `get_drawings()` rects (drawings-only; text blocks pull in body text) within one column above the caption, and in multi-column papers bound the window below the previous element so adjacent tables/text aren't caught; verify the render and re-crop if needed. Embed with `![[<slug>-figN.<ext>]]` plus an italic caption.
    - **Also embed a key results / motivating figure** when the paper has one — a scaling plot, a benchmark chart, or a capability collage — in the Results section alongside the table.
    - **Mermaid is the dependency-free fallback.** If PyMuPDF/poppler isn't available or a figure can't be extracted, draw the architecture as a Mermaid diagram instead — Obsidian renders Mermaid fenced code blocks natively with no dependencies. `![[<source>.pdf#page=N]]` (the whole source page) is another no-extract option.
 3. **Keep the math as math.** Set the 1–3 core equations as `$$…$$` display LaTeX, not backtick code.
@@ -348,7 +354,7 @@ If the source is not project-specific, put everything in global categories.
 
 ### Step 4: Plan Updates
 
-Before writing anything, plan which pages to update or create. Aim for 10-15 pages per ingest. For each:
+Before writing anything, plan which pages to update or create. Cap the plan at `OBSIDIAN_MAX_PAGES_PER_INGEST` pages (default `15` if unset) — aim for 10 pages up to that cap. If the plan would exceed the cap, prioritize by importance tier (`core` > `supporting` > `peripheral`, see below) and defer the rest to a follow-up ingest; tell the user how many pages were deferred. For each:
 - Does this page already exist? (Check `index.md` and use Glob to search `OBSIDIAN_VAULT_PATH`)
 - If it exists, what new information does this source add?
 - If it's new, which category does it belong in?
@@ -400,13 +406,13 @@ For each page in your plan:
 - Use the page template from the llm-wiki skill (frontmatter + sections). **For academic papers landing in `references/`, use the Paper Deep-Dive Template** from `llm-wiki/SKILL.md` instead of the generic one (see *Academic papers* in Step 1).
 - Place in the correct category directory
 - Add `[[wikilinks]]` to at least 2-3 existing pages
-- Include the source in the `sources` frontmatter field. In raw mode: derive from `capture_source` + `sources` frontmatter of the `_raw/` file — never use the `_raw/` path itself (see Raw Mode section)
+- Include the origin in the `sources` frontmatter field **and** a bottom **Sources** section (see Raw Mode snapshot provenance). YAML `sources:` is origin keys (`url:`, `agent:`, …), not the archive path. File/raw ingest: `snapshots set` (YAML `"[[_raw/_archived/stem|stem]]"`) plus `[[_raw/_archived/…]]` in the body. Live URL only if this ingest fetched the web with no snapshot.
 
 **If updating an existing page:**
 - Read the current page first
 - Merge new information — don't just append
 - Update the `updated` timestamp in frontmatter
-- Add the new source to the `sources` list
+- Add the new origin to the `sources` list and to the bottom **Sources** section (same snapshot-vs-URL rules as create)
 - Resolve any contradictions between old and new information (note them if unresolvable)
 
 **Populate `relationships:` when context is clear** — if Step 2 identified typed relationships between this page and another, add a `relationships:` block to the frontmatter (defined in `llm-wiki/SKILL.md`, Typed Relationships section). Only add entries where the source text makes the direction and type unambiguous. When in doubt, use `related_to` or omit the block. Example:
@@ -456,7 +462,7 @@ After writing pages, check that wikilinks work in both directions. If page A lin
 
 ### Step 7: Update Manifest and Special Files
 
-**`.manifest.json`** — For each source file ingested, add or update its entry:
+**`.manifest.json`** — For each source file ingested, add or update its entry. The **key** must be a portable source key (contract v2 in `llm-wiki/SKILL.md` → `.manifest.json`): vault-relative when the source is inside the vault (`Raw/articles/foo.pdf`), `~`-relative when under `$HOME` (`~/.claude/...`), or a pseudo-key (`repo:`/`url:`/`agent:`) when neither applies. **Never key an entry by a machine absolute path.** The value is:
 ```json
 {
   "content_hash": "sha256:<64-char-hex>",
@@ -466,34 +472,35 @@ After writing pages, check that wikilinks work in both directions. If page A lin
   "project": "project-name-or-null"
 }
 ```
+The page's `sources:` frontmatter uses the same key form as the manifest entry, so provenance stays portable too.
 `content_hash`, `last_ingested`, and `pages_produced` are the three fields `cache.py` reads and writes (`cache-check` / `cache-update`) — the field names must match exactly or incremental-skip detection breaks. `content_hash` is the SHA-256 of the file contents at ingest time; it's the primary skip signal on subsequent runs, so always write it. `source_type` and `project` are advisory metadata for your own bookkeeping — the cache layer doesn't read them.
 
 Also update `stats.total_sources_ingested` and `stats.total_pages`.
 
+**In parallel runs** (batch fan-out, or while the Docker server is writing the same vault), record sources with `obsidian-wiki cache-update` rather than hand-editing `.manifest.json`. That command takes an advisory lock, writes atomically, and normalises the key to the portable form; concurrent hand edits are a plain read-modify-write and silently drop whichever entry lands second. For a source with no portable path form, pass its pseudo-key explicitly: `obsidian-wiki cache-update <vault> <path> --key repo:github.com/owner/name`.
+
 If the manifest doesn't exist yet, create it with `version: 1`.
 
-**`index.md`** — Add entries for any new pages, update summaries for modified pages.
+**`index.md`, `log.md`, `hot.md`** — one command, not three hand edits:
 
-**`log.md`** — Append an entry:
+```bash
+obsidian-wiki memory sync INGEST source="path/to/source"
+  pages_created=N pages_updated=M \
+  mode=append \
+  --takeaways "Fowler's decomposition argument now anchors the microservices cluster."
 ```
-- [TIMESTAMP] INGEST source="path/to/source" pages_updated=N pages_created=M mode=append|full
-```
 
-**`hot.md`** — Read `$OBSIDIAN_VAULT_PATH/hot.md` (create from template below if missing). Rewrite the **Recent Activity** section to reflect what you just ingested — keep it to the last 3 operations max. Update **Key Takeaways** and **Active Threads** if the content materially shifted them. Update the `updated` timestamp.
+This appends the log line, reconciles `index.md` against the pages on disk, and
+regenerates `hot.md` — all under one advisory lock, so a parallel ingest agent
+cannot drop your update. Never hand-edit those three files: concurrent wholesale
+rewrites are exactly what this replaces.
 
-Write the *conceptual* change, not a file list. Example: "Ingested Fowler's microservices article — 3 new concept pages on service decomposition, API gateway, bounded contexts."
+`--takeaways` is the one part that is yours to write; everything else in
+`hot.md` is generated. Write the *conceptual* change, not a file list. Omit the
+flag and the previous takeaways carry across unchanged. Use `--takeaways -` to
+pipe multi-line prose in on stdin.
 
-hot.md template (use if the file doesn't exist):
-```markdown
----
-title: Hot Cache
-updated: TIMESTAMP
----
-## Recent Activity
-## Active Threads
-## Key Takeaways
-## Flagged Contradictions
-```
+See `.skills/llm-wiki/references/MEMORY.md` for the full procedure.
 
 ### Step 8: Refresh QMD Wiki Index (optional — requires `QMD_WIKI_COLLECTION`)
 
@@ -546,6 +553,8 @@ After ingesting, verify:
 - [ ] `index.md` reflects all changes
 - [ ] `log.md` has the ingest entry
 - [ ] Source attribution is present for every new claim
+- [ ] Every new/updated page has a bottom **Sources** section with Obsidian wikilinks to `_raw/_archived/…` snapshots (or a live URL only if ingest was `/ingest-url` with no local file)
+- [ ] YAML `sources:` is origin keys (`url:`, `agent:`, …), not archive paths; after a `_raw/_archived/` move, `snapshots set` then `cache-update` ran on the archived path (YAML `snapshots:` is `"[[_raw/_archived/stem|stem]]"`, not Markdown links); clipping `source:`/`url` frontmatter is not copied in as the clickable source
 - [ ] Inferred and ambiguous claims are marked with `^[inferred]` / `^[ambiguous]`; `provenance:` frontmatter block is present on new and updated pages
 - [ ] Every new/updated page has a `summary:` frontmatter field (1–2 sentences, ≤200 chars)
 - [ ] `relationships:` block is present on pages where source text made typed connections clear; all entries use an allowed type from `llm-wiki/SKILL.md`

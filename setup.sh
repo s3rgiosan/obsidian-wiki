@@ -6,7 +6,10 @@
 #
 # What it does:
 #   1. Creates .env from .env.example (if not present)
-#   2. Writes ~/.obsidian-wiki/config[.<profile>] so skills work from any project
+#   2. Writes the global config (XDG-style, under ~/.config/obsidian-wiki by
+#      default; legacy ~/.obsidian-wiki is honored if it already exists) as
+#      config, or config.<profile> when CLAUDE_PROFILE is set, so skills work
+#      from any project
 #   3. Symlinks .skills/* into each agent's expected skills directory:
 #      Project-local:
 #        - .claude/skills/        (Claude Code)
@@ -111,9 +114,23 @@ else
   echo "✅  .env already exists"
 fi
 
-# ── Step 1b: ~/.obsidian-wiki/config ─────────────────────────
-GLOBAL_CONFIG_DIR="$HOME/.obsidian-wiki"
+# ── Step 1b: global config ────────────────────────────────────
+# XDG-style location by default; installs that already have the legacy
+# ~/.obsidian-wiki keep using it so upgrading doesn't strand a working config.
+XDG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/obsidian-wiki"
+LEGACY_DIR="$HOME/.obsidian-wiki"
+if [ -d "$LEGACY_DIR" ] && [ ! -e "$XDG_DIR" ]; then
+  GLOBAL_CONFIG_DIR="$LEGACY_DIR"
+else
+  GLOBAL_CONFIG_DIR="$XDG_DIR"
+fi
 mkdir -p "$GLOBAL_CONFIG_DIR"
+
+WRITING_PROFILE="$GLOBAL_CONFIG_DIR/WRITING.md"
+WRITING_TEMPLATE="$SKILLS_DIR/llm-wiki/references/WRITING.md"
+if [ ! -e "$WRITING_PROFILE" ]; then
+  cp "$WRITING_TEMPLATE" "$WRITING_PROFILE"
+fi
 
 # Read vault path from .env if it's already set
 VAULT_PATH=""
@@ -144,8 +161,8 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
 fi
 CLAUDE_HISTORY_PATH="${CLAUDE_HISTORY_PATH:-$HOME/.claude}"
 
-# Profile name from .env — if set, writes ~/.obsidian-wiki/config.<profile>;
-# if empty, writes ~/.obsidian-wiki/config.
+# Profile name from .env — if set, writes $GLOBAL_CONFIG_DIR/config.<profile>;
+# if empty, writes $GLOBAL_CONFIG_DIR/config.
 CLAUDE_PROFILE=""
 if [ -f "$SCRIPT_DIR/.env" ]; then
   CLAUDE_PROFILE=$(grep -E '^CLAUDE_PROFILE=' "$SCRIPT_DIR/.env" | cut -d'=' -f2- | sed 's/^"//;s/"$//')
@@ -153,10 +170,8 @@ fi
 
 if [ -n "$CLAUDE_PROFILE" ]; then
   GLOBAL_CONFIG="$GLOBAL_CONFIG_DIR/config.$CLAUDE_PROFILE"
-  echo "✅  Profile config written to ~/.obsidian-wiki/config.$CLAUDE_PROFILE"
 else
   GLOBAL_CONFIG="$GLOBAL_CONFIG_DIR/config"
-  echo "✅  Global config written to ~/.obsidian-wiki/config"
 fi
 
 cat > "$GLOBAL_CONFIG" <<EOF
@@ -164,6 +179,7 @@ OBSIDIAN_VAULT_PATH="$VAULT_PATH"
 OBSIDIAN_WIKI_REPO="$SCRIPT_DIR"
 CLAUDE_HISTORY_PATH="$CLAUDE_HISTORY_PATH"
 EOF
+echo "✅  Global config written to $GLOBAL_CONFIG"
 
 # ── Step 1c: Bootstrap symlinks ──────────────────────────────
 # .hermes.md → AGENTS.md  (Hermes resolves .hermes.md before AGENTS.md;
@@ -290,7 +306,7 @@ if [[ "$SETUP_SYNC" =~ ^[Yy]$ ]]; then
         SYNC_CMD="$(command -v python3 &>/dev/null && echo "env PYTHONPATH=$SCRIPT_DIR python3 -m obsidian_wiki.cli sync" || echo "obsidian-wiki sync")"
         CRON_LINE="0 * * * * $SYNC_CMD --vault $VAULT_PATH >> $GLOBAL_CONFIG_DIR/sync.log 2>&1"
         ( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | sort -u | crontab -
-        echo "✅  Hourly cron installed  (logs: ~/.obsidian-wiki/sync.log)"
+        echo "✅  Hourly cron installed  (logs: $GLOBAL_CONFIG_DIR/sync.log)"
       fi
     fi
   fi
@@ -304,6 +320,7 @@ echo "────────────────────────�
 echo " Setup complete!"
 echo ""
 echo " Skills found:    $SKILL_COUNT"
+echo " Writing profile:  $WRITING_PROFILE"
 echo " Agents ready:    Claude Code, Cursor, Windsurf, Gemini CLI, Antigravity,"
 echo "                  Codex, Hermes, OpenClaw, OpenCode, Aider, Factory Droid,"
 echo "                  Trae, Trae CN, Kiro, Pi, GitHub Copilot (CLI + VS Code Chat)"

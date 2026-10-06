@@ -1,11 +1,7 @@
 ---
 name: wiki-setup
 description: >
-  Initialize a new Obsidian wiki vault with the correct structure, special files, and configuration.
-  Use this skill when the user wants to set up a new wiki from scratch, initialize the vault structure,
-  create the .env file, or says things like "set up my wiki", "initialize obsidian", "create a new vault",
-  "get started with the wiki". Also use when the user needs to reconfigure their existing vault or
-  fix a broken setup.
+  Initialize or repair an Obsidian wiki vault's required structure and configuration. Use for new-vault setup, .env/config creation, reconfiguration, or broken setup recovery.
 ---
 
 # Obsidian Setup — Vault Initialization
@@ -61,6 +57,54 @@ If `.env` doesn't exist, create it from `.env.example`. Ask the user for:
    - Set to `true` for team wikis, high-stakes domains, or any vault where the human wants final say on every LLM-written page
    - When enabled: all new/updated pages land in `_staging/` first; run `/wiki-stage-commit` to review and promote them
    - `wiki-status` shows a "Staged writes pending" count when files are waiting
+
+After resolving config, assign the global config directory with the exact
+`obsidian_wiki_config_dir` algorithm from the Config Resolution Protocol in
+`.skills/llm-wiki/SKILL.md`. Create the shared writing profile only when it does not
+already exist. Preserve an existing `$GLOBAL_CONFIG_DIR/WRITING.md`; never overwrite it
+and do not ask additional writing-style questions.
+
+Use `OBSIDIAN_WIKI_REPO` when it was loaded from config. When it is absent, derive the
+absolute repository/data root from this loaded skill's absolute path, distinguishing the
+packaged `<root>/skills/wiki-setup/SKILL.md` layout from the source
+`<root>/.skills/wiki-setup/SKILL.md` layout. Then check both canonical template layouts:
+
+- Packaged install: `<root>/skills/llm-wiki/references/WRITING.md`
+- Source checkout: `<root>/.skills/llm-wiki/references/WRITING.md`
+
+```bash
+GLOBAL_CONFIG_DIR="$(obsidian_wiki_config_dir)"
+mkdir -p "$GLOBAL_CONFIG_DIR"
+
+SKILL_FILE="<absolute path of this loaded wiki-setup/SKILL.md>"
+SKILL_DIR="$(cd "$(dirname "$SKILL_FILE")" && pwd)"
+if [ -n "${OBSIDIAN_WIKI_REPO:-}" ]; then
+  WIKI_ROOT="${OBSIDIAN_WIKI_REPO%/}"
+else
+  case "$SKILL_DIR" in
+    */.skills/wiki-setup) WIKI_ROOT="${SKILL_DIR%/.skills/wiki-setup}" ;;
+    */skills/wiki-setup) WIKI_ROOT="${SKILL_DIR%/skills/wiki-setup}" ;;
+    *) echo "Cannot derive writing-profile template root from $SKILL_DIR" >&2; exit 1 ;;
+  esac
+fi
+
+WRITING_TEMPLATE=""
+for candidate in \
+  "$WIKI_ROOT/skills/llm-wiki/references/WRITING.md" \
+  "$WIKI_ROOT/.skills/llm-wiki/references/WRITING.md"
+do
+  if [ -f "$candidate" ]; then
+    WRITING_TEMPLATE="$candidate"
+    break
+  fi
+done
+[ -n "$WRITING_TEMPLATE" ] || { echo "Writing profile template not found under $WIKI_ROOT" >&2; exit 1; }
+
+WRITING_PROFILE="$GLOBAL_CONFIG_DIR/WRITING.md"
+if [ ! -e "$WRITING_PROFILE" ]; then
+  cp "$WRITING_TEMPLATE" "$WRITING_PROFILE"
+fi
+```
 
 ## Step 2: Create Vault Directory Structure
 
@@ -194,9 +238,10 @@ Run a quick sanity check:
 - [ ] `.env` has `OBSIDIAN_VAULT_PATH` set
 - [ ] `.obsidian/` directory exists
 - [ ] `_staging/` directory exists (required even when `WIKI_STAGED_WRITES` is not set — created on setup for future use)
+- [ ] `WRITING_PROFILE` exists at the resolved global config directory
 - [ ] Source directories (if configured) exist and are readable
 
-Report the results and tell the user they can now:
+Report the results, including the resolved absolute `WRITING_PROFILE` path, and tell the user they can now:
 1. Open the vault in Obsidian (File → Open Vault → select the directory)
 2. Run `wiki-status` to see what's available to ingest
 3. Run `wiki-ingest` to add their first sources
@@ -230,13 +275,16 @@ inconclusive sessions are skipped automatically.
    - `<REPO_PATH>/.claude/hooks/wiki-stop-capture.sh` — source checkout.
 
    If neither exists (e.g. an older wheel that predates bundling the hook), fetch the canonical
-   copy to a stable location and point at that instead:
+   copy to a stable location and point at that instead. Use the global config dir from the
+   Config Resolution Protocol in `llm-wiki/SKILL.md` (XDG-style `~/.config/obsidian-wiki` by
+   default, or the legacy `~/.obsidian-wiki` if that already exists):
 
    ```bash
-   mkdir -p ~/.obsidian-wiki/hooks
+   CONFIG_DIR="$( [[ -d "$HOME/.obsidian-wiki" && ! -e "${XDG_CONFIG_HOME:-$HOME/.config}/obsidian-wiki" ]] && echo "$HOME/.obsidian-wiki" || echo "${XDG_CONFIG_HOME:-$HOME/.config}/obsidian-wiki" )"
+   mkdir -p "$CONFIG_DIR/hooks"
    curl -fsSL https://raw.githubusercontent.com/Ar9av/obsidian-wiki/main/.claude/hooks/wiki-stop-capture.sh \
-     -o ~/.obsidian-wiki/hooks/wiki-stop-capture.sh
-   chmod +x ~/.obsidian-wiki/hooks/wiki-stop-capture.sh
+     -o "$CONFIG_DIR/hooks/wiki-stop-capture.sh"
+   chmod +x "$CONFIG_DIR/hooks/wiki-stop-capture.sh"
    ```
 
    Use the resolved absolute path as `<HOOK_PATH>` below.
@@ -276,7 +324,8 @@ inconclusive sessions are skipped automatically.
    end of any session where you write files or run ≥ 4 shell commands."
 
 **To uninstall later:** remove the hook entry from `~/.claude/settings.json` or set
-`HIVEMIND_CAPTURE=false` in your shell to skip capture for a single session.
+`WIKI_STOP_CAPTURE=false` in your shell to skip capture for a single session
+(`HIVEMIND_CAPTURE=false` is still honoured).
 
 ## Optional: Configure GitHub Sync
 

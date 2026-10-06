@@ -1,13 +1,7 @@
 ---
 name: wiki-lint
 description: >
-  Audit and maintain the health of the Obsidian wiki. Use this skill when the user wants to check their
-  wiki for issues, find orphaned pages, detect contradictions, identify stale content, fix broken wikilinks,
-  or perform general maintenance on their knowledge base. Also triggers on "clean up the wiki",
-  "what needs fixing", "audit my notes", or "wiki health check". Add --consolidate to switch from
-  report-only to act-and-report mode (the "dream cycle"): fixes broken links, adds missing cross-references
-  for orphans, corrects lifecycle states, demotes stale peripheral pages, normalizes tag aliases, and adds
-  contradiction callouts — all with a dry-run preview and explicit user confirmation before any writes.
+  Audit wiki health: broken links, orphans, contradictions, stale content, lifecycle and tag issues. Use for maintenance or health checks. Default is report-only; use wiki-dedup for page-identity merges.
 ---
 
 # Wiki Lint — Health Audit
@@ -18,9 +12,22 @@ You are performing a health check on an Obsidian wiki. Your goal is to find and 
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH`
-2. Read `index.md` for the full page inventory
-3. Read `log.md` for recent activity context
+**Writing profile:** Before drafting or rewriting natural-language Markdown, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+Apply `WRITING.md` preferences only to generated consolidation reports; deterministic findings and fixes keep their existing formats.
+
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH` plus any `OBSIDIAN_ALLOWED_LIFECYCLES`, `OBSIDIAN_ALLOWED_RELATIONSHIP_TYPES`, `OBSIDIAN_REQUIRED_TRUST_FIELDS`, and `OBSIDIAN_SCHEMA_SOURCE` values.
+2. **Read owner rules** — if `$OBSIDIAN_VAULT_PATH/AGENTS.md` exists, read it before interpreting any schema. Owner rules override framework defaults.
+3. **Form the effective schema** — record the schema source locator plus effective required/optional frontmatter, lifecycle values, relationship types, and provenance markers. Framework values are defaults; preserve owner extensions and relaxed requiredness exactly. Never coerce an owner type to a framework type.
+4. Read `index.md` for the full page inventory
+5. Read `log.md` for recent activity context
+
+Pass the effective schema to deterministic checks explicitly. For example, add each owner extension with `--allow-lifecycle` / `--allow-relationship-type`, replace trust requiredness with repeatable `--required-trust-field`, and identify the authority with `--schema-source "$OBSIDIAN_VAULT_PATH/AGENTS.md"`. The JSON report's `schema` block must match the schema you formed before findings are accepted.
+
+Schema precedence is CLI flags > resolved environment/config values > framework defaults; lifecycle and relationship extensions remain additive. Strip every override before use. An explicitly configured empty or whitespace-only value—and any empty comma-separated list entry—fails closed; never treat it as a valid lifecycle, relationship type, required field, or authority locator. Remove the variable instead when defaults are intended.
+
+When `obsidian-wiki` is on PATH, prefer `obsidian-wiki lint "$OBSIDIAN_VAULT_PATH" --json` (with the same schema override flags as above) and fold the JSON `findings` into the health report. If the CLI is unavailable, keep the grep-based checks below — do not require the binary.
+
+If the JSON report includes `findings.snapshot_mismatch`, list those pages in the report. Missing or drifted `snapshots:` is **not** missing required frontmatter (section 3 still covers only title, category, tags, sources, created, updated). Do not rewrite `sources:` to fix snapshot drift. Run `obsidian-wiki snapshots apply --from-json <lint.json>` (dry-run), show the preview, and pass `--apply` only after explicit user confirmation. Apply writes quoted `"[[_raw/_archived/stem|stem]]"` list items (native Property links with display text). `wiki-lint --consolidate` still does not apply this finding.
 
 ## Lint Checks
 
@@ -47,8 +54,10 @@ Find `[[wikilinks]]` that point to pages that don't exist.
 
 **How to check:**
 - Grep for `\[\[.*?\]\]` across all pages
-- Extract the link targets
-- Check if a corresponding `.md` file exists
+- Extract the link target: drop everything from the first `|` (alias) or `#` (heading/block anchor), and strip a trailing backslash left by an escaped `\|` inside a table cell
+- Skip a target whose extension is an attachment type (`.png`, `.jpg`, `.gif`, `.svg`, `.webp`, `.pdf`, `.canvas`, `.base`, audio and video): it's an embed, not a page link, and has no entry in the `.md` inventory this check compares against
+- Do **not** treat every dot as an extension — `[[Node.js]]`, `[[Next.js]]`, and `[[v1.2 release notes]]` are page links whose names happen to contain a dot, and dropping them would both miss real broken links and make the target page look like an orphan
+- Strip an explicit `.md` suffix from what remains, then check if a corresponding `.md` file exists
 
 **How to fix:**
 - If the target was renamed, update the link
@@ -182,13 +191,13 @@ Confidence is a semantic judgment. A deterministic tool cannot infer independent
 
 #### Rule 12a — `lifecycle` enum validation
 
-**How to check:** Grep frontmatter for `^lifecycle:` across all pages. Flag any value not in `{draft, reviewed, verified, disputed, archived}`.
+**How to check:** Grep frontmatter for `^lifecycle:` across all pages. Flag any value outside the effective lifecycle set (framework default: `{draft, reviewed, verified, disputed, archived}`).
 
 **How to fix:** n/a (only a human should set lifecycle state)
 
 #### Rule 12b — `base_confidence` range
 
-**How to check:** Grep frontmatter for `^base_confidence:` across all pages. Flag any value outside `[0.0, 1.0]` or any page missing the field entirely.
+**How to check:** Grep frontmatter for `^base_confidence:` across all pages. Flag any present value outside `[0.0, 1.0]`; flag absence only when the effective owner schema requires the field.
 
 **How to fix:** n/a (wrong value means the skill computed it wrong — surface for manual correction)
 
@@ -201,6 +210,18 @@ Staleness is never stored — it is computed at read time: `is_stale = (today �
 - All other stale pages as a standard warning
 
 **How to fix:** `--fix` does **not** rewrite `lifecycle`. Staleness clears automatically when a re-ingest bumps `updated`.
+
+#### Rule 12c-2 — Illegal lifecycle transitions
+
+The lifecycle enum is a state machine, not a free-form label. `obsidian-wiki lint` reports `illegal_lifecycle_transitions` by comparing each page's current `lifecycle` against the value recorded in `_meta/trust-ledger.json` at its last review.
+
+**Flagged:** any state falling back to `draft` (only ingest sets `draft`), and any exit from `archived` (terminal — a restore is a deliberate human delete-and-recreate).
+
+**Not flagged:** `draft → verified`. Ledger snapshots are sparse, so a legitimate intermediate `reviewed` may have happened between two reviews; flagging it would fire on valid history.
+
+Warns by default; fails under `--strict-trust`. Pages whose ledger entry predates the `lifecycle` field have no baseline and are skipped silently.
+
+**How to fix:** n/a — a page that moved along a forbidden edge means either a skill wrote `lifecycle` when it shouldn't have, or a human transition needs recording. Surface for human resolution.
 
 #### Rule 12d — Supersession integrity
 
@@ -269,8 +290,9 @@ merely to silence warnings.
 
 #### Current enforcement
 
-Full enforcement is active. Every non-reserved content page must contain a
+Under framework defaults, every non-reserved content page must contain a
 finite `base_confidence` in `[0.0, 1.0]` and a documented lifecycle value.
+An owner schema may relax either field; present values remain validated.
 Missing or malformed trust fields, malformed ledger data, and a missing required
 ledger are hard errors. New pages with valid trust fields but no approved ledger
 entry are `unreviewed`; material changes to approved pages are `stale`.
@@ -300,7 +322,7 @@ Append to the `LINT` log entry:
 
 Validate `relationships:` frontmatter blocks. Skip pages that have no `relationships:` block — the field is optional.
 
-**Allowed types:** `extends`, `implements`, `contradicts`, `derived_from`, `uses`, `replaces`, `related_to`
+**Framework-default types:** `extends`, `implements`, `contradicts`, `derived_from`, `uses`, `replaces`, `related_to`. Validate against the effective set after applying owner extensions.
 
 **How to check:**
 - Grep frontmatter for `^relationships:` across all vault pages
@@ -308,10 +330,11 @@ Validate `relationships:` frontmatter blocks. Skip pages that have no `relations
 - For each entry in the block:
   1. **Type validation** — flag any `type:` value not in the allowed set above
   2. **Broken target** — strip `[[` and `]]` from the `target:` string, normalize (lowercase, spaces→hyphens, strip `.md`), and check whether a `.md` file at that path exists in the vault. Flag unresolved targets.
+     Before normalizing, drop everything from the first `|` (alias) or `#` (heading/block anchor): a pipe-aliased or heading-anchored target is not broken just because the literal bracket contents don't match a filename.
   3. **Self-reference** — flag any entry where the resolved target equals the page's own node id
 
 **How to fix:**
-- Invalid type: correct the value to the nearest allowed type, or use `related_to` when the type is ambiguous
+- Invalid type: report the value and effective schema source. Correct it only if it is absent from both framework defaults and owner extensions; never replace a valid owner type with `related_to`.
 - Broken target: update or remove the entry; if the target page should exist, create it first
 - Self-reference: remove the entry
 
@@ -327,6 +350,43 @@ Validate `relationships:` frontmatter blocks. Skip pages that have no `relations
 Append to the `LINT` log entry:
 ```
 ... relationship_issues=N
+```
+
+### 14. Event-Time Validity
+
+Validate `valid_from` / `valid_until` / `superseded_by` frontmatter. All three are optional — skip pages that carry none of them.
+
+`created`/`updated` are ingestion time; these three are event time, when the claim itself was true. A page whose `valid_until` has passed is **historical**, not wrong: it stays in the vault and in the graph, and only drops out of default retrieval.
+
+**How to check:**
+- Grep frontmatter for `^valid_from:`, `^valid_until:`, `^superseded_by:` across all vault pages
+- For each page that has any of them:
+  1. **Date parseability** — each value must be `YYYY-MM-DD` or a full ISO 8601 timestamp. Flag anything else.
+  2. **Window order** — flag any page where `valid_until` precedes `valid_from`
+  3. **Dangling successor** — strip `[[`/`]]` from `superseded_by`, drop everything from the first `|` or `#`, strip `.md`, normalize, and check the page exists. Flag unresolved targets and self-references.
+
+`obsidian-wiki lint` reports all three as `temporal_errors` (dates, windows) and `superseded_dangling` (successors). A bracketed dangling successor also shows up in `broken_links`.
+
+**Why the dates fail rather than warn:** retrieval treats an unparseable window as current, so an unreported typo lets a stale claim answer as fact — the exact failure the fields exist to prevent.
+
+**How to fix:**
+- Unparseable date: rewrite as `YYYY-MM-DD`; if the real date is unknown, remove the field rather than guessing
+- Inverted window: confirm which date is wrong with the page's sources; never silently swap them
+- Dangling successor: create the replacement page, correct the pointer, or remove it if nothing replaced the claim
+- Never "fix" a historical page by rewriting it as current — that destroys the record the window exists to keep
+
+**Output additions:**
+
+```markdown
+### Event-Time Issues (N found)
+- `references/gateway-nginx.md` — valid_until (2026-04-01) precedes valid_from (2026-05-01)
+- `references/old-limits.md` — valid_until "soon" is not a date
+- `references/legacy-auth.md` — superseded_by "[[oauth-rollout]]" resolves to no page in vault
+```
+
+Append to the `LINT` log entry:
+```
+... temporal_issues=N
 ```
 
 ### 11. Synthesis Gaps
@@ -434,7 +494,7 @@ Triggered by `wiki-lint --consolidate`. Switches from report-only to **act-and-r
 2. Print the planned consolidation actions as a structured list (see Dry-Run Output below).
 3. Ask the user: `"Apply these N changes? [yes / no / select]"`.
 4. Only proceed with writes after explicit confirmation. If the user selects individual actions, apply only those.
-5. Never merge pages — use `wiki-dedup` for that. Only link, promote, demote, and flag.
+5. Never merge pages — use `wiki-dedup` for that. Only link, promote, demote, and flag. Never apply `snapshot_mismatch` here; that stays on the snapshots CLI with its own confirmation (see Before You Start).
 
 ### Consolidation actions (in order, after confirmation)
 

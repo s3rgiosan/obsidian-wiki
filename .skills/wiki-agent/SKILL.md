@@ -1,14 +1,7 @@
 ---
 name: wiki-agent
 description: >
-  Query-driven targeted ingest from a specific AI agent's raw history. Use this skill when the user
-  invokes /wiki-claude, /wiki-codex, /wiki-hermes, /wiki-openclaw, /wiki-copilot, /wiki-pi — with or without a
-  search topic. Different from wiki-history-ingest (which bulk-ingests everything new): this skill finds
-  sessions about a SPECIFIC TOPIC in a specific agent's history and ingests just those, then returns a
-  synthesized answer immediately usable in the current session. Primary use case: you're working in
-  agent A and want to pull in how you solved X in agent B's history. Cross-referencing, not archiving.
-  Also trigger on: "what did I work on in codex about X", "search my claude sessions for Y",
-  "pull in hermes knowledge about Z", "find that conversation where I did X in codex".
+  Search one AI agent's raw history for a specific topic, ingest only matching sessions, and return a synthesized answer. Use for targeted cross-agent recall; use wiki-history-ingest for bulk archival ingestion.
 ---
 
 # Wiki Agent — Targeted Cross-Agent History Search + Ingest
@@ -34,7 +27,10 @@ If no query is given, default to **recent sessions mode**: ingest the last 5 unp
 
 ## Before You Start
 
-1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → `~/.obsidian-wiki/config` → prompt setup). This gives `OBSIDIAN_VAULT_PATH`.
+**Writing profile:** Before drafting or rewriting natural-language Markdown, read and apply the `Writing Profile Resolution` section in `llm-wiki/SKILL.md`. Framework schema, provenance, safety, and operation-specific requirements take precedence.
+`WRITING.md` preferences apply only to newly drafted or rewritten natural-language Markdown; preserve source content and structured records.
+
+1. **Resolve config** — follow the Config Resolution Protocol in `llm-wiki/SKILL.md` (inline `@name` override → `$CLAUDE_CONFIG_DIR` instance match → walk up CWD for `.env` → global config → prompt setup). This gives `OBSIDIAN_VAULT_PATH`.
 2. Read `$OBSIDIAN_VAULT_PATH/.manifest.json` → know what's already ingested.
 3. Read `$OBSIDIAN_VAULT_PATH/hot.md` if it exists → warm context on recent wiki activity.
 
@@ -61,8 +57,8 @@ Use the **cheapest index source** for each agent — don't open session files un
 
 ### Claude
 ```
-Primary index:   ~/.claude/projects/  (directories = projects, files = sessions)
-Session files:   ~/.claude/projects/*/*.jsonl
+Primary index:   $CLAUDE_HISTORY_PATH/projects/  (directories = projects, files = sessions)
+Session files:   $CLAUDE_HISTORY_PATH/projects/*/*.jsonl
 Desktop index:   find ~/Library/Application Support/Claude/local-agent-mode-sessions -name "local_*.json"
 Signal fields:   sessionId, cwd, startedAt, title (in local_*.json)
 ```
@@ -116,7 +112,14 @@ If a query was given, score each session in the inventory without opening full s
 
 1. **Name/title match** — does the session name or thread title contain the query terms? Score: +3
 2. **CWD/project match** — does the working directory suggest the right project? Score: +2
-3. **Recency** — sessions from the last 90 days score higher than older ones. Score: +1 per 30-day recency bracket (max +3)
+3. **Recency** — apply exponential time decay with a 90-day half-life, as a multiplier on the match score rather than a bonus added to it:
+
+   ```
+   base  = name_match(3) + cwd_match(2)
+   score = base * (0.35 + 0.65 * 0.5 ** (age_days / 90))
+   ```
+
+   The 0.35 floor is deliberate: an old session that matches the query exactly must still outrank a recent one that barely matches, or the skill can never answer "how did I first solve this?". This is the same decay `session-brain` uses, so the two skills rank consistently.
 4. **Already ingested** — if this session was previously ingested and the wiki page already covers the query (check `hot.md` + `index.md`), flag as "covered" but still show in results
 
 Select the **top 3–5 sessions** by score. If no query was given, select the 5 most recent unprocessed sessions.
@@ -245,12 +248,19 @@ Update `.manifest.json` for each session file processed:
 }
 ```
 
-Append to `log.md`:
-```
-- [TIMESTAMP] WIKI-AGENT agent=<agent> query="<query>" sessions_searched=N sessions_ingested=M pages_created=X pages_updated=Y
+One locked call updates the log, the index, and the hot cache:
+
+```bash
+obsidian-wiki memory sync WIKI-AGENT \
+  agent=<agent> query="<query>" \
+  sessions_searched=<N> sessions_ingested=<M> \
+  pages_created=<X> pages_updated=<Y> \
+  --takeaways "<one line: what was pulled in and what it changes>"
 ```
 
-Update `hot.md` with a one-line summary of what was ingested.
+Never hand-edit `index.md`, `log.md`, or `hot.md` — the command takes the lock that keeps a parallel writer from dropping your update.
+
+See `.skills/llm-wiki/references/MEMORY.md` for the full procedure.
 
 ---
 

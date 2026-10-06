@@ -9,15 +9,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from obsidian_wiki.vault import SKIP_DIRS as VAULT_SKIP_DIRS
+from obsidian_wiki.vault import BLOCK_SCALAR_RE, iter_md, split_frontmatter
+
 
 DEFAULT_BUDGET = 8_000
 MIN_BUDGET = 256
 MAX_BUDGET = 100_000
-SKIP_DIRS = frozenset({"_raw", "_staging", "_archives", "_archived", "_readouts", ".obsidian", ".git"})
+SKIP_DIRS = VAULT_SKIP_DIRS | {"_readouts"}
 SKIP_FILES = frozenset({"AGENTS.md", "CLAUDE.md", "GEMINI.md", "hot.md", "index.md", "log.md", "_insights.md"})
 BLOCKED_PUBLIC_TAGS = frozenset({"visibility/internal", "visibility/pii"})
 TIER_ORDER = {"core": 0, "supporting": 1, "peripheral": 2}
-_FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", re.DOTALL)
 _H1_RE = re.compile(r"^[ ]{0,3}#\s+(.+?)\s*$", re.MULTILINE)
 _SECTION_HEADING_RE = re.compile(r"^[ ]{0,3}(#{1,})\s+(.+?)\s*$")
 _ATX_CLOSING_MARKERS_RE = re.compile(r"\s+#+\s*$")
@@ -47,11 +49,6 @@ class PageRecord:
 
 def estimate_tokens(text: str) -> int:
     return math.ceil(len(text) / 4)
-
-
-def _split_frontmatter(text: str) -> tuple[str, str]:
-    match = _FRONTMATTER_RE.match(text)
-    return (match.group(1), text[match.end():]) if match else ("", text)
 
 
 def _without_yaml_comment(value: str) -> str:
@@ -113,6 +110,18 @@ def _frontmatter_values(frontmatter: str) -> dict[str, Any]:
         key, value = key.strip(), _without_yaml_comment(raw.strip())
         if value.startswith("[") and value.endswith("]"):
             values[key] = tuple(item.strip().strip("'\"") for item in value[1:-1].split(",") if item.strip())
+        elif BLOCK_SCALAR_RE.match(value):
+            # `title: >-` / `summary: >-` is the page template's own form; the
+            # value is on the indented lines below. `>` folds them, `|` keeps them.
+            block: list[str] = []
+            cursor = index + 1
+            while cursor < len(lines) and (lines[cursor].startswith((" ", "\t")) or not lines[cursor].strip()):
+                block.append(lines[cursor].strip())
+                cursor += 1
+            joiner = "\n" if value.startswith("|") else " "
+            values[key] = joiner.join(part for part in block if part).strip()
+            index = cursor
+            continue
         elif not value:
             children: list[str] = []
             cursor = index + 1
@@ -175,7 +184,7 @@ def _without_sources(body: str) -> str:
 
 def _page_from_path(path: Path, vault: Path) -> PageRecord:
     text = path.read_text(encoding="utf-8", errors="replace")
-    frontmatter, body = _split_frontmatter(text)
+    frontmatter, body = split_frontmatter(text)
     values = _frontmatter_values(frontmatter)
     h1 = _H1_RE.search(body)
     title = str(values.get("title", "")).strip() or (h1.group(1).strip() if h1 else path.stem)
@@ -189,9 +198,8 @@ def load_pages(vault: Path, *, public_only: bool = False) -> list[PageRecord]:
     if not vault.is_dir():
         raise ContextError("vault_not_found", f"vault not found: {vault}")
     pages: list[PageRecord] = []
-    for path in sorted(vault.rglob("*.md")):
-        relative = path.relative_to(vault)
-        if path.name in SKIP_FILES or any(part in SKIP_DIRS for part in relative.parts):
+    for path in iter_md(vault, SKIP_DIRS):
+        if path.name in SKIP_FILES:
             continue
         page = _page_from_path(path, vault)
         if not public_only or not BLOCKED_PUBLIC_TAGS.intersection(page.tags):
@@ -246,7 +254,7 @@ def compress_body(body: str, max_chars: int) -> str:
     if max_chars <= 0:
         return ""
 
-    _frontmatter, clean = _split_frontmatter(body)
+    _frontmatter, clean = split_frontmatter(body)
     kept: list[str] = []
     selected_depth: int | None = None
     sources_depth: int | None = None
