@@ -682,8 +682,7 @@ def _refresh_installed_skills() -> int:
     """
     bundled = set(list_skills())
     refreshed = 0
-    for rel, label, subset in GLOBAL_AGENT_DIRS:
-        target = HOME / rel
+    for target, label, subset in global_agent_dirs():
         if not target.is_dir():
             continue
         ours = [p for p in target.iterdir() if p.name in bundled and (p / "SKILL.md").exists()]
