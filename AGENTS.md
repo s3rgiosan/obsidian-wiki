@@ -31,6 +31,8 @@ You can maintain multiple vaults (each a `<global config dir>/config.<name>` fil
 
 **After reading config, always read `$OBSIDIAN_VAULT_PATH/AGENTS.md` if it exists.** It contains owner-specific conventions (domain vocabulary, ingest preferences, writing style, project scoping) that override framework defaults for all skills. Apply it for the duration of the session.
 
+**Timestamps come from `obsidian-wiki memory now`** (`--date` for a bare date). It honors the vault's `timezone:` key in `index.md` and prints UTC in the `Z` spelling without one. Write what it prints into `created:`, `updated:`, and `lifecycle_changed:`; never derive a stamp from `date -u` or estimate one.
+
 ## Vault Structure
 
 ```
@@ -61,7 +63,7 @@ Every wiki page has required frontmatter: `title`, `category`, `tags`, `sources`
 
 ## Skill Routing
 
-Skills live in `.skills/<name>/SKILL.md`. Match the user's intent to the right skill:
+Skills live in `skills/<name>/SKILL.md`. Match the user's intent to the right skill:
 
 | User says something like… | Skill |
 |---|---|
@@ -78,6 +80,7 @@ Skills live in `.skills/<name>/SKILL.md`. Match the user's intent to the right s
 | "wiki insights" / "hubs" / "wiki structure" | `wiki-status` (insights mode) |
 | "is my vault at equilibrium" / "wiki equilibrium" / "is maintenance done" / "are my skills fighting" | `wiki-status` (equilibrium mode) |
 | "what do I know about X" / "find info on Y" / any question | `wiki-query` |
+| "challenge this" / "argue against X" / "what did I decide about X?" | `wiki-query` (challenge query) |
 | "use my vault as context" / "context pack for X" / "bounded context" | `wiki-context-pack` |
 | "narrate" / "briefing" / "explain this topic" / "/wiki-narrate" | `wiki-narrate` |
 | "audit" / "lint" / "find broken links" / "wiki health" | `wiki-lint` |
@@ -171,11 +174,11 @@ See `wiki-query` and `wiki-export` skills for how the filter is applied.
 - **Frontmatter is required.** Every wiki page needs: `title`, `category`, `tags`, `sources`, `created`, `updated`.
 - **Single source of truth.** Visibility tags shape how content is surfaced — they don't duplicate or separate it.
 - **Keep context warm.** `hot.md` is a ~500-word semantic snapshot of recent activity. Every write skill updates it so the next session can pick up where the last one left off without crawling the full vault.
-- **Write memory through the CLI.** `index.md`, `log.md`, `hot.md`, `_meta/profile.md`, and `_meta/todos.md` are maintained by `obsidian-wiki memory`, which locks and writes atomically. Call `obsidian-wiki memory sync --verb <VERB> --field k=v` after a write operation instead of editing those files by hand — hand edits in a parallel run drop whichever write lands second. The one exception is `## Key Takeaways` in `hot.md`, which is yours: pass it with `memory hot --takeaways`.
+- **Write memory through the CLI.** `index.md`, `log.md`, `hot.md`, `_meta/profile.md`, and `_meta/todos.md` are maintained by `obsidian-wiki memory`, which locks and writes atomically. Call `obsidian-wiki memory sync --verb <VERB> --field k=v` after a write operation instead of editing those files by hand — hand edits in a parallel run drop whichever write lands second. The one exception is `## Key Takeaways` in `hot.md`, which is yours: replacements require the reviewed current revision (see llm-wiki/references/MEMORY.md); pass it with `memory hot --takeaways`.
 
 ## Architecture Reference
 
-For the full pattern (three-layer architecture, page templates, project org), read `.skills/llm-wiki/SKILL.md`.
+For the full pattern (three-layer architecture, page templates, project org), read `skills/llm-wiki/SKILL.md`.
 
 Human-facing documentation lives in `docs/` — `installation.md`, `agents.md`, `skills.md`, `cli.md`, `configuration.md`, `architecture.md`, `session-brain.md`, `contributing.md`. `README.md` is a landing page only; when you add a skill, CLI command, or config variable, update the matching `docs/` page rather than the README.
 

@@ -62,11 +62,20 @@ The deterministic `lint`, `trust-record`, and `trust-check` commands use the sam
 
 Local git repo clones work in `OBSIDIAN_SOURCES_DIR` (public or private, any host). Clone locally, then add the path. Repo directories are auto-detected via a `.git` folder and enumerated with `git ls-files`, so whatever the repo's own `.gitignore` excludes — `node_modules`, build output, venvs, secrets — is skipped automatically rather than relying on a hardcoded skip-list.
 
+## Settings that live in the vault
+
+Two keys sit in the frontmatter of the root `index.md` rather than in a config file, so they travel with the vault and apply to every caller — CLI, server, Python API — whichever config that caller resolved. `memory index` preserves them across rebuilds.
+
+| Key | What it does | Default |
+|---|---|---|
+| `timezone` | IANA zone for every stamp the memory writer produces (`2026-10-10T14:40:37-04:00`); `obsidian-wiki memory now` prints it for skills. `setup --timezone <zone>` writes it, and a new vault on a terminal is asked once | UTC, `Z` spelling |
+| `index_folder_hubs` | `true` lists a folder that has its own `index.md` once, as a hub, instead of inlining its pages | `false` |
+
 ## Session hooks
 
 ![Session lifecycle](images/memory-session-lifecycle.png)
 
-Two Claude Code hooks bracket a session. Register them with `obsidian-wiki hooks install`; check them with `hooks status` or `doctor`. `wiki-session-recap.sh` runs at SessionStart and injects the owner profile, open threads, and recent vault activity. `wiki-stop-capture.sh` runs at Stop and nudges a quick capture when the session changed anything.
+Two Claude Code hooks bracket a session. Register them with `obsidian-wiki hooks install`; check them with `hooks status` or `doctor`. `wiki-session-recap.sh` runs at SessionStart and injects the owner profile, open threads, and recent vault activity. `wiki-stop-capture.sh` runs at Stop and nudges a quick capture when the session changed anything. `wiki-prompt-recall.sh` is opt-in (`hooks install --only UserPromptSubmit`): it adds the few notes relevant to each prompt, or nothing.
 
 | Variable | What it does | Default |
 |---|---|---|
@@ -77,6 +86,8 @@ Two Claude Code hooks bracket a session. Register them with `obsidian-wiki hooks
 | `WIKI_RECAP_PROJECT` | Override the project the recap is scoped to (default: git repo name) | *(auto)* |
 | `WIKI_RECAP_DEBUG` | `1` makes the recap hook explain each silent exit on stderr | *(off)* |
 | `WIKI_STOP_CAPTURE` | `false` skips the end-of-session capture nudge | *(on)* |
+| `WIKI_PROMPT_RECALL` | `false` silences the opt-in per-prompt recall hook | *(on once registered)* |
+| `WIKI_RECALL_TIMEOUT` | Seconds before a per-prompt recall is abandoned | `5` |
 | `WIKI_STOP_REARM_SECONDS` | Elapsed time before the capture nudge can fire again | `21600` |
 | `WIKI_STOP_REARM_EDITS` | New edits required before the nudge can fire again | `10` |
 
@@ -119,7 +130,7 @@ Staged pages aren't visible in Obsidian's graph until promoted. `wiki-status` li
 
 ## Vault Skill Factory
 
-`vault-skill-factory` turns mature curated pages into portable Agent Skills. Generated skills land in a **review directory** — never auto-installed, never written into `.skills/`.
+`vault-skill-factory` turns mature curated pages into portable Agent Skills. Generated skills land in a **review directory** — never auto-installed, never written into `skills/`.
 
 | Variable | What it does | Default |
 |---|---|---|
@@ -130,7 +141,7 @@ Staged pages aren't visible in Obsidian's graph until promoted. `wiki-status` li
 
 For long PDFs — books, reports — PageIndex builds a table-of-contents tree (section titles, summaries, page ranges) before ingest, so the agent reads only the relevant sections. Without it, `wiki-ingest` reads PDFs directly.
 
-Install: clone [PageIndex](https://github.com/VectifyAI/PageIndex), create a venv, and put an LLM key in its `.env` (LiteLLM). See `.skills/wiki-ingest/references/pageindex.md`.
+Install: clone [PageIndex](https://github.com/VectifyAI/PageIndex), create a venv, and put an LLM key in its `.env` (LiteLLM). See `skills/wiki-ingest/references/pageindex.md`.
 
 | Variable | What it does | Default |
 |---|---|---|
@@ -138,6 +149,14 @@ Install: clone [PageIndex](https://github.com/VectifyAI/PageIndex), create a ven
 | `PAGEINDEX_MODEL` | LiteLLM model id PageIndex uses | `openai/glm-4.6` |
 | `PAGEINDEX_MIN_PAGES` | Only preprocess PDFs with at least this many pages | `30` |
 | `PAGEINDEX_WORKSPACE` | Cache dir for `*_structure.json` | `<PAGEINDEX_REPO>/results` |
+
+## URL ingest (optional)
+
+When the `firecrawl` CLI isn't installed, `/ingest-url` falls back to [Jina Reader](https://jina.ai/reader) for PDFs and JavaScript-rendered pages. It works without a key at a low rate limit. See `skills/wiki-ingest/references/url-sources.md`.
+
+| Variable | What it does | Default |
+|---|---|---|
+| `JINA_API_KEY` | Raises the Jina Reader rate limit | *(empty, keyless)* |
 
 ## QMD semantic search (optional)
 
@@ -196,7 +215,7 @@ Missing CodeGraph never breaks normal `wiki-update` or `doctor` runs. The graph 
 
 | Variable | What it does | Default |
 |---|---|---|
-| `CODE_UNDERSTANDING_BACKEND` | How `wiki-update` understands project structure: `auto` (CodeGraph when available, else the built-in `ast-extract` + `rg`), `builtin` (always the built-in, dependency-free), or `codegraph` (explicitly require CodeGraph; warn/error if unavailable) | `auto` |
+| `CODE_UNDERSTANDING_BACKEND` | How `wiki-update` understands project structure: `auto` (CodeGraph when available, else a Graphify graph when `graphify-out/graph.json` exists, else the built-in `ast-extract` + `rg`), `builtin` (always the built-in, dependency-free), `codegraph` (explicitly require CodeGraph; warn/error if unavailable), or `graphify` (explicitly require a Graphify graph) | `auto` |
 | `CODE_UNDERSTANDING_CODEGRAPH_BIN` | Path to the `codegraph` binary if it isn't on `PATH` | *(empty)* |
 
 Both variables resolve like `OBSIDIAN_VAULT_PATH`: a real environment variable wins (empty counts as unset), then the nearest `.env` walking up from the project directory (stopping at the first one that sets a `CODE_UNDERSTANDING` key), then the global config ([where the global config lives](#where-the-global-config-lives)), then the default.
@@ -215,6 +234,12 @@ Verify with `obsidian-wiki doctor --project .` — the `code-understanding.codeg
 
 - The first enhanced `wiki-update` run auto-initializes the project's `.codegraph/` index; later runs sync only what changed.
 - Your agent can run the install for you — just ask it to use CodeGraph when running `/wiki-update`.
+
+### Using a Graphify graph
+
+If you already run [Graphify](https://github.com/Graphify-Labs/graphify) on a project, `wiki-update` reads its graph instead of re-parsing the code. Run `graphify .` in the project as usual; with `auto`, a `graphify-out/graph.json` beside the project is picked up when CodeGraph isn't installed. obsidian-wiki only reads that file. It never runs Graphify or spends tokens rebuilding the graph, and warns when `graph.json` is older than the newest committed file.
+
+Each edge keeps Graphify's confidence as the focus-map item's `evidence` (`graphify-extracted`, `graphify-inferred`, `graphify-ambiguous`), with extracted edges ranked first. Graphify maps what the code *is*; the vault keeps what you decided and learned about it.
 
 ## `_raw/` staging directory
 

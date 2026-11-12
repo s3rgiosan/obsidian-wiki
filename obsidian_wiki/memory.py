@@ -29,12 +29,16 @@ Four artifacts, three of them generated and one hybrid:
 from __future__ import annotations
 
 import os
+import hashlib
+import json
+from contextlib import contextmanager
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import date, datetime, timedelta, timezone, tzinfo
+from pathlib import Path, PurePosixPath
 from typing import Iterable, Optional, Sequence
 
+from obsidian_wiki import clock
 from obsidian_wiki.cache import advisory_lock
 from obsidian_wiki.provenance import archive_wikilink_relpath
 from obsidian_wiki.vault import BLOCK_SCALAR_RE, FRONTMATTER_RE, iter_md, split_frontmatter
@@ -110,13 +114,25 @@ class MemoryError_(RuntimeError):
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """UTC in the ``Z`` spelling: the stamp this writer produced before vaults had a timezone."""
+    return clock.stamp(None)
 
 
-def today() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
+def now_stamp(vault: Path) -> str:
+    """The full timestamp for a write to *vault*, in the vault's configured zone.
+
+    ``timezone:`` in ``index.md`` picks the zone; without it this is
+    :func:`utc_now`. See :mod:`obsidian_wiki.clock`.
+    """
+    return clock.stamp(clock.wiki_timezone(vault))
 
 
+def today(tz: Optional[tzinfo] = None) -> str:
+    """Bare calendar date in *tz* (UTC when the vault has no zone)."""
+    return clock.today(tz)
+
+
+@contextmanager
 def memory_lock(vault: Path, *, timeout: float = 10.0):
     """Serialise writes to the prose memory files.
 
@@ -125,23 +141,16 @@ def memory_lock(vault: Path, *, timeout: float = 10.0):
     single logical update, and interleaving another writer between them is what
     produced inconsistent snapshots before.
     """
-    return advisory_lock(Path(vault) / MEMORY_LOCK_NAME, timeout=timeout)
+    from .memory_transaction import recover
+    with advisory_lock(Path(vault) / MEMORY_LOCK_NAME, timeout=timeout):
+        recover(Path(vault))
+        yield
 
 
 def atomic_write(path: Path, text: str) -> None:
     """Replace *path* with *text* via a temp file and ``os.replace``."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)  # atomic on POSIX and Windows
-    except BaseException:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
-        raise
+    from .memory_transaction import atomic_bytes
+    atomic_bytes(Path(path), text.encode("utf-8"))
 
 
 def _require_vault(vault: Path) -> Path:
@@ -218,7 +227,7 @@ def mark_adopted(vault: Path) -> None:
     Delete the file to re-arm the guard — say, after restoring a curated
     index.md from ``_archives/`` — and ``memory migrate`` will ask again.
     """
-    atomic_write(Path(vault) / ADOPTED_REL, f"adopted: {utc_now()}\nby: {GENERATED_MARKER}\n")
+    atomic_write(Path(vault) / ADOPTED_REL, f"adopted: {now_stamp(vault)}\nby: {GENERATED_MARKER}\n")
 
 
 def check_scope(scope: str) -> str:
@@ -327,7 +336,7 @@ def append_log(
     log+index+hot as one update holds it across all three.
     """
     vault = _require_vault(vault)
-    line = format_log_line(verb, fields, timestamp=timestamp)
+    line = format_log_line(verb, fields, timestamp=timestamp or now_stamp(vault))
     log = vault / "log.md"
 
     def _write() -> None:
@@ -475,13 +484,99 @@ def _heading_for(category: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def _index_entry(page: PageInfo, link_format: str) -> str:
+#: Characters a ``[[wikilink]]`` target cannot carry: ``]`` ends the link, ``#``
+#: starts a heading anchor and ``|`` starts an alias. A page whose name holds one
+#: of them is unlinkable in that form.
+_WIKILINK_UNSAFE = frozenset("]#|")
+
+
+def _wikilink_target_is_valid(node: str) -> bool:
+    return not (_WIKILINK_UNSAFE & set(node))
+
+
+def _markdown_link_text(title: str) -> str:
+    """Escape ``]`` so a title cannot close the link text early."""
+    return title.replace("]", r"\]")
+
+
+def _index_entry(page: PageInfo, link_format: str, *, hub_pages: Optional[int] = None) -> str:
     node = page.path[:-3] if page.path.endswith(".md") else page.path
-    link = f"[{page.title}]({page.path})" if link_format == "markdown" else f"[[{node}]]"
+    if link_format == "markdown" or not _wikilink_target_is_valid(node):
+        # A name a wikilink cannot express falls back to the markdown form so
+        # ``rebuild_index`` can read its own output back (and hand the entry to
+        # Obsidian in a form it can resolve).
+        link = f"[{_markdown_link_text(page.title)}]({page.path})"
+    elif hub_pages is not None:
+        # A hub's node ends in `/index`, which Obsidian would display as
+        # "index"; the alias shows the folder's own title instead.
+        link = f"[[{node}|{page.title}]]"
+    else:
+        link = f"[[{node}]]"
     # Format rule: a space after the opening paren, or tag parsing breaks.
     tags = f" ( {' '.join('#' + tag for tag in page.tags)})" if page.tags else ""
     summary = f" — {page.summary}" if page.summary else ""
-    return f"- {link}{summary}{tags}"
+    count = "" if hub_pages is None else f" ({hub_pages} page{'' if hub_pages == 1 else 's'})"
+    return f"- {link}{summary}{count}{tags}"
+
+
+#: Root ``index.md`` frontmatter key that turns on folder hubs (see
+#: ``collapse_folder_hubs``). It lives in the file it governs, so the setting
+#: travels with the vault instead of depending on which ``.env`` a caller saw.
+FOLDER_HUBS_KEY = "index_folder_hubs"
+
+_H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
+
+
+def folder_hubs_enabled(index_text: str) -> bool:
+    values = parse_frontmatter(split_frontmatter(index_text)[0])
+    return str(values.get(FOLDER_HUBS_KEY) or "").strip().lower() in {"true", "yes", "1"}
+
+
+def collapse_folder_hubs(vault: Path, pages: Sequence) -> tuple:
+    """Replace every page under a folder that has its own ``index.md`` with
+    one entry for that index, so a sub-wiki is linked rather than inlined.
+
+    Returns ``(entries, hub_counts)``: ``entries`` keeps every page outside a
+    hub plus each hub's index page, and ``hub_counts`` maps a hub index's path
+    to how many pages it stands for. The outermost hub wins when hubs nest.
+    """
+    hubs = sorted(
+        {
+            str(PurePosixPath(page.path).parent)
+            for page in pages
+            if PurePosixPath(page.path).name == "index.md" and "/" in page.path
+        },
+        key=len,
+    )
+    outermost: list = []
+    for hub in hubs:
+        if not any(hub.startswith(f"{outer}/") for outer in outermost):
+            outermost.append(hub)
+
+    entries, hub_counts = [], {}
+    by_path = {page.path: page for page in pages}
+    for page in pages:
+        hub = next((h for h in outermost if page.path.startswith(f"{h}/")), None)
+        if hub is None:
+            entries.append(page)
+        else:
+            hub_counts[f"{hub}/index.md"] = hub_counts.get(f"{hub}/index.md", 0) + 1
+    for hub_path, count in hub_counts.items():
+        entries.append(_hub_page(vault, by_path[hub_path], count - 1))
+        hub_counts[hub_path] = count - 1  # the index itself is not one of its pages
+    return entries, hub_counts
+
+
+def _hub_page(vault: Path, page: PageInfo, count: int) -> PageInfo:
+    """The hub's index page, titled for display: frontmatter title, else its
+    H1, else the folder name — never the bare stem "index"."""
+    title = page.title
+    if title == "index":
+        body = split_frontmatter((vault / page.path).read_text(encoding="utf-8", errors="replace"))[1]
+        heading = _H1_RE.search(body)
+        folder = PurePosixPath(page.path).parent.name
+        title = heading.group(1) if heading else folder.replace("-", " ").replace("_", " ").title()
+    return replace(page, title=title)
 
 
 @dataclass(frozen=True)
@@ -493,7 +588,15 @@ class IndexResult:
     text: str
 
 
-def render_index(pages: Sequence, *, link_format: str = "wikilink", preamble: str = "", extra_sections: str = "") -> str:
+def render_index(
+    pages: Sequence,
+    *,
+    link_format: str = "wikilink",
+    preamble: str = "",
+    extra_sections: str = "",
+    hub_counts: Optional[dict] = None,
+) -> str:
+    hub_counts = hub_counts or {}
     by_category: dict = {}
     for page in pages:
         by_category.setdefault(page.category, []).append(page)
@@ -507,7 +610,10 @@ def render_index(pages: Sequence, *, link_format: str = "wikilink", preamble: st
         entries = sorted(by_category[category], key=lambda p: (p.title.casefold(), p.path))
         chunks.append(
             f"## {_heading_for(category)}\n\n"
-            + "\n".join(_index_entry(page, link_format) for page in entries)
+            + "\n".join(
+                _index_entry(page, link_format, hub_pages=hub_counts.get(page.path))
+                for page in entries
+            )
         )
     if not by_category:
         chunks.append("## Concepts\n\n*No pages yet. Use `wiki-ingest` to add your first source.*")
@@ -567,8 +673,15 @@ def rebuild_index(
     Regenerates one section per category and preserves the preamble plus any
     section whose heading is not a category — a hand-written "Reading queue"
     section survives, a stale page entry does not.
+
+    With ``index_folder_hubs: true`` in the index frontmatter, a folder that
+    has its own ``index.md`` is listed once, as a link to that index, instead
+    of page by page (see ``collapse_folder_hubs``).
     """
     vault = _require_vault(vault)
+    if write and lock:
+        with memory_lock(vault):
+            return rebuild_index(vault, link_format=link_format, write=True, lock=False, force=force)
     index = vault / "index.md"
     if write and not force and not (is_adopted(vault) or is_generated(index)):
         raise MemoryError_(
@@ -596,22 +709,37 @@ def rebuild_index(
         body.strip("\n") for heading, body in sections.items() if heading not in categories
     )
 
+    # Only the link that opens an entry line is what the index lists; links in
+    # the entry's summary text point elsewhere and are not catalog entries.
     listed = set()
     for heading, body in sections.items():
         if heading in categories:
-            for match in _WIKILINK_RE.finditer(body):
-                if archive_wikilink_relpath(vault, match.group(1)) is not None:
-                    continue
-                listed.add(match.group(1).strip())
             for line in body.splitlines():
-                md = re.match(r"^-\s*\[[^\]]*\]\(([^)]+)\)", line.strip())
+                entry = re.match(r"^-\s*(\[\[[^\]]+\]\])", line.strip())
+                if entry:
+                    match = _WIKILINK_RE.match(entry.group(1))
+                    if match and archive_wikilink_relpath(vault, match.group(1)) is None:
+                        listed.add(match.group(1).strip())
+                    continue
+                # Link text may carry an escaped ``]`` (see _index_entry); the
+                # capture is the path, so the escape only has to be skipped.
+                md = re.match(r"^-\s*\[(?:\\.|[^\]])*\]\(([^)]+)\)", line.strip())
                 if md:
                     listed.add(md.group(1)[:-3] if md.group(1).endswith(".md") else md.group(1))
 
-    current = {page.path[:-3] for page in pages}
+    entries, hub_counts = (
+        collapse_folder_hubs(vault, pages) if folder_hubs_enabled(existing) else (pages, {})
+    )
+    current = {page.path[:-3] for page in entries}
     added = tuple(sorted(current - listed))
     removed = tuple(sorted(listed - current))
-    text = render_index(pages, link_format=link_format, preamble=preamble, extra_sections=extra)
+    text = render_index(
+        entries,
+        link_format=link_format,
+        preamble=preamble,
+        extra_sections=extra,
+        hub_counts=hub_counts,
+    )
     changed = text != existing
 
     if write and changed:
@@ -635,6 +763,10 @@ class Fact:
     confidence: float
     source: str
     updated: str
+    until: str = ""  # YYYY-MM-DD after which the fact no longer holds; empty = durable
+
+    def is_expired(self, on: Optional[str] = None) -> bool:
+        return bool(self.until) and self.until < (on or today())
 
 
 def _cell(text: str) -> str:
@@ -645,8 +777,12 @@ def _uncell(text: str) -> str:
     return text.replace(r"\|", "|").strip()
 
 
-def _parse_table(text: str, columns: int) -> list:
-    """Rows of the first markdown table in *text*, header and rule dropped."""
+def _parse_table(text: str, columns: int, optional: int = 0) -> list:
+    """Rows of the first markdown table in *text*, header and rule dropped.
+
+    *optional* trailing columns may be missing (a table written before they
+    existed); they come back as empty strings.
+    """
     rows = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -657,7 +793,8 @@ def _parse_table(text: str, columns: int) -> list:
             continue
         if all(set(cell) <= {"-", ":", " "} and cell for cell in cells):
             continue  # the |---|---| rule
-        rows.append(cells[:columns])
+        cells += [""] * optional
+        rows.append(cells[: columns + optional])
     return rows[1:] if rows else []  # drop the header row
 
 
@@ -675,10 +812,11 @@ generated_by: obsidian-wiki memory profile
 
 *Durable facts about the vault owner, injected into an agent's context at session
 start. Written by `obsidian-wiki memory profile set`; safe to edit by hand — the
-table round-trips. Confidence is the writer's own calibration, not a measurement.*
+table round-trips. Confidence is the writer's own calibration, not a measurement.
+A fact with an Until date drops out of the session recap once that date passes.*
 
-| Fact | Value | Confidence | Source | Updated |
-|---|---|---|---|---|
+| Fact | Value | Confidence | Source | Updated | Until |
+|---|---|---|---|---|---|
 """
 
 
@@ -687,22 +825,24 @@ def load_profile(vault: Path, scope: str = "") -> list:
     if not path.is_file():
         return []
     facts = []
-    for row in _parse_table(path.read_text(encoding="utf-8"), 5):
-        key, value, confidence, source, updated = row
+    for row in _parse_table(path.read_text(encoding="utf-8"), 5, optional=1):
+        key, value, confidence, source, updated, until = row
         if not key:
             continue
         try:
             score = float(confidence)
         except ValueError:
             score = 0.5
-        facts.append(Fact(key, value, score, source, updated))
+        facts.append(Fact(key, value, score, source, updated, until))
     return facts
 
 
-def render_profile(facts: Sequence, *, created: str = "", updated: str = "") -> str:
-    header = _PROFILE_HEADER.format(created=created or today(), updated=updated or today())
+def render_profile(
+    facts: Sequence, *, created: str = "", updated: str = "", tz: Optional[tzinfo] = None
+) -> str:
+    header = _PROFILE_HEADER.format(created=created or today(tz), updated=updated or today(tz))
     rows = "\n".join(
-        f"| {_cell(f.key)} | {_cell(f.value)} | {f.confidence:.2f} | {_cell(f.source)} | {_cell(f.updated)} |"
+        f"| {_cell(f.key)} | {_cell(f.value)} | {f.confidence:.2f} | {_cell(f.source)} | {_cell(f.updated)} | {_cell(f.until)} |"
         for f in sorted(facts, key=lambda f: f.key.casefold())
     )
     return header + (rows + "\n" if rows else "")
@@ -715,22 +855,35 @@ def set_fact(
     *,
     confidence: float = 0.6,
     source: str = "conversation",
+    until: str = "",
     scope: str = "",
     lock: bool = True,
 ) -> Fact:
-    """Add or replace one durable fact about the owner."""
+    """Add or replace one fact about the owner.
+
+    *until* (YYYY-MM-DD) marks a time-bound fact — "exams this weekend" — so it
+    stops being injected once it is over instead of lingering until a human
+    notices. The row stays in the table; `forget` removes it.
+    """
     vault = _require_vault(vault)
     key = key.strip()
     if not key:
         raise MemoryError_("bad_key", "fact key must not be empty")
     if not 0.0 <= confidence <= 1.0:
         raise MemoryError_("bad_confidence", f"confidence must be in [0.0, 1.0]: {confidence}")
-    fact = Fact(key, value.strip(), confidence, source.strip(), today())
+    until = until.strip()
+    if until:
+        try:
+            until = date.fromisoformat(until).isoformat()
+        except ValueError:
+            raise MemoryError_("bad_until", f"until must be YYYY-MM-DD: {until}") from None
+    tz = clock.wiki_timezone(vault)
+    fact = Fact(key, value.strip(), confidence, source.strip(), today(tz), until)
 
     def _write() -> None:
         facts = [f for f in load_profile(vault, scope) if f.key.casefold() != key.casefold()]
         facts.append(fact)
-        atomic_write(profile_path(vault, scope), render_profile(facts))
+        atomic_write(profile_path(vault, scope), render_profile(facts, tz=tz))
 
     if lock:
         with memory_lock(vault):
@@ -748,7 +901,7 @@ def forget_fact(vault: Path, key: str, *, scope: str = "", lock: bool = True) ->
         kept = [f for f in facts if f.key.casefold() != key.strip().casefold()]
         if len(kept) == len(facts):
             return False
-        atomic_write(profile_path(vault, scope), render_profile(kept))
+        atomic_write(profile_path(vault, scope), render_profile(kept, tz=clock.wiki_timezone(vault)))
         return True
 
     if lock:
@@ -817,9 +970,11 @@ def load_todos(vault: Path, scope: str = "") -> list:
     return todos
 
 
-def render_todos(todos: Sequence, *, created: str = "", updated: str = "") -> str:
+def render_todos(
+    todos: Sequence, *, created: str = "", updated: str = "", tz: Optional[tzinfo] = None
+) -> str:
     header = _TODOS_HEADER.format(
-        created=created or today(), updated=updated or today(), stale=DEFAULT_TODO_STALE_DAYS
+        created=created or today(tz), updated=updated or today(tz), stale=DEFAULT_TODO_STALE_DAYS
     )
     order = {status: position for position, status in enumerate(TODO_STATUSES)}
     rows = "\n".join(
@@ -844,18 +999,19 @@ def add_todo(vault: Path, text: str, *, origin: str = "", scope: str = "", lock:
     text = text.strip()
     if not text:
         raise MemoryError_("bad_todo", "todo text must not be empty")
+    tz = clock.wiki_timezone(vault)
     holder: list = []
 
     def _write() -> None:
         todos = load_todos(vault, scope)
         existing = next((t for t in todos if t.text.casefold() == text.casefold() and t.status == "open"), None)
         if existing is not None:  # idempotent: re-adding an open thread just touches it
-            todo = replace(existing, touched=today())
+            todo = replace(existing, touched=today(tz))
             todos = [todo if t.id == existing.id else t for t in todos]
         else:
-            todo = Todo(_next_todo_id(todos), text, "open", origin.strip(), today(), today())
+            todo = Todo(_next_todo_id(todos), text, "open", origin.strip(), today(tz), today(tz))
             todos.append(todo)
-        atomic_write(todos_path(vault, scope), render_todos(todos))
+        atomic_write(todos_path(vault, scope), render_todos(todos, tz=tz))
         holder.append(todo)
 
     if lock:
@@ -870,6 +1026,7 @@ def set_todo_status(vault: Path, todo_id: str, status: str, *, scope: str = "", 
     vault = _require_vault(vault)
     if status not in TODO_STATUSES:
         raise MemoryError_("bad_status", f"status must be one of {', '.join(TODO_STATUSES)}")
+    tz = clock.wiki_timezone(vault)
     holder: list = []
 
     def _write() -> None:
@@ -877,10 +1034,10 @@ def set_todo_status(vault: Path, todo_id: str, status: str, *, scope: str = "", 
         match = next((t for t in todos if t.id.casefold() == todo_id.strip().casefold()), None)
         if match is None:
             raise MemoryError_("no_such_todo", f"no todo with id {todo_id!r}")
-        updated = replace(match, status=status, touched=today())
+        updated = replace(match, status=status, touched=today(tz))
         atomic_write(
             todos_path(vault, scope),
-            render_todos([updated if t.id == match.id else t for t in todos]),
+            render_todos([updated if t.id == match.id else t for t in todos], tz=tz),
         )
         holder.append(updated)
 
@@ -902,7 +1059,7 @@ def prune_todos(vault: Path, *, scope: str = "", lock: bool = True) -> int:
         kept = [t for t in todos if t.status == "open"]
         holder.append(len(todos) - len(kept))
         if len(kept) != len(todos):
-            atomic_write(todos_path(vault, scope), render_todos(kept))
+            atomic_write(todos_path(vault, scope), render_todos(kept, tz=clock.wiki_timezone(vault)))
 
     if lock:
         with memory_lock(vault):
@@ -1011,10 +1168,23 @@ def _contradiction_lines(pages: Sequence, limit: int, link_format: str) -> list:
     return lines[:limit]
 
 
+def _takeaways_revision(text: str) -> str:
+    return hashlib.sha256(_section_body(text, "Key Takeaways").encode("utf-8")).hexdigest()
+
+
+def takeaways_revision(vault: Path) -> str:
+    """Canonical section SHA-256; consumers obtain it from memory status JSON."""
+    path = Path(vault) / "hot.md"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    return _takeaways_revision(text)
+
+
 def build_hot(
     vault: Path,
     *,
     takeaways: Optional[str] = None,
+    expected_takeaways_sha256: Optional[str] = None,
+    pending_log_line: Optional[str] = None,
     link_format: str = "wikilink",
     max_words: Optional[int] = None,
     activity_limit: int = DEFAULT_RECENT_ACTIVITY,
@@ -1025,21 +1195,35 @@ def build_hot(
 
     Word-capped for real. When the render is over budget, sections are dropped
     in increasing order of value: activity lines first, then contradictions,
-    then threads, and ``Key Takeaways`` is truncated last because it is the only
-    part a model wrote on purpose.
+    then threads. Durable takeaways are never truncated; overflow raises.
     """
     vault = _require_vault(vault)
     cap = max_words or hot_max_words()
     hot = vault / "hot.md"
     existing = hot.read_text(encoding="utf-8") if hot.is_file() else ""
 
+    carried = _section_body(existing, "Key Takeaways")
+    expected_takeaways_sha256 = expected_takeaways_sha256 or None  # "$TAKEAWAYS_REVISION" unset = no revision
+    if expected_takeaways_sha256 is not None:
+        if takeaways is None:
+            raise MemoryError_("takeaways_revision_without_replacement", "omit revision for carry-forward sync")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_takeaways_sha256):
+            raise MemoryError_("takeaways_revision_invalid", "expected revision must be a lowercase SHA-256")
+        if expected_takeaways_sha256 != _takeaways_revision(existing):
+            raise MemoryError_("takeaways_conflict", "Key Takeaways changed; reread memory status --json and reconcile")
+    elif takeaways is not None and carried and carried != _TAKEAWAYS_PLACEHOLDER:
+        raise MemoryError_("takeaways_revision_required",
+                           "existing Key Takeaways require --expect-takeaways-sha256 from memory status --json "
+                           "(Python API: expected_takeaways_sha256)")
     if takeaways is None:
-        carried = _section_body(existing, "Key Takeaways")
         takeaways = carried if carried else _TAKEAWAYS_PLACEHOLDER
     takeaways = takeaways.strip() or _TAKEAWAYS_PLACEHOLDER
 
     pages = scan_pages(vault)
     activity = _recent_activity_lines(vault, activity_limit)
+    if pending_log_line:
+        activity.append(summarize_log_entry(parse_log_line(pending_log_line)))
+        activity = activity[-activity_limit:] if activity_limit else []
     threads = [t for t in load_todos(vault) if t.status == "open"][:thread_limit]
     contradictions = _contradiction_lines(pages, contradiction_limit, link_format)
 
@@ -1052,7 +1236,7 @@ def build_hot(
         ]
         blocks = [
             "---\ntitle: Hot Cache\n"
-            f"updated: {utc_now()}\n"
+            f"updated: {now_stamp(vault)}\n"
             f"pages: {len(pages)}\n"
             f"generated_by: {GENERATED_MARKER} hot\n---",
             "# Hot Cache",
@@ -1067,17 +1251,17 @@ def build_hot(
     text = _render(activity, contradictions, threads, takeaways)
     trimmed = False
     while content_words(text) > cap:
-        if len(activity) > 1:
+        if activity:
             activity = activity[1:]
         elif contradictions:
             contradictions = contradictions[:-1]
-        elif len(threads) > 1:
+        elif threads:
             threads = threads[:-1]
         else:
-            words = takeaways.split()
-            if len(words) <= 20:
-                break  # the skeleton alone exceeds the cap; report it instead of looping
-            takeaways = " ".join(words[: max(20, len(words) - 25)]) + " …"
+            raise MemoryError_("takeaways_overflow",
+                               f"durable takeaways and cache structure exceed {cap} words; "
+                               "move details to a knowledge page and provide a revision-checked summary, "
+                               "or explicitly choose a larger --max-words; nothing was truncated")
         trimmed = True
         text = _render(activity, contradictions, threads, takeaways)
 
@@ -1102,7 +1286,10 @@ def rebuild_hot(
             "to review the change and take a backup first",
         )
     if lock:
-        with memory_lock(vault):
+        guard = memory_lock(vault) if write else advisory_lock(vault / MEMORY_LOCK_NAME)
+        with guard:
+            if not write and (vault / ".memory-transaction.json").exists():
+                raise MemoryError_("memory_recovery_required", "pending transaction; let an official writer recover before preview")
             result = build_hot(vault, **kwargs)
             if write:
                 atomic_write(vault / "hot.md", result.text)
@@ -1133,7 +1320,11 @@ def build_recap(
     separate file reads the model has to remember to make.
     """
     vault = _require_vault(vault)
-    facts = [f for f in load_profile(vault, scope) if f.confidence >= min_confidence]
+    on = today(clock.wiki_timezone(vault))
+    facts = [
+        f for f in load_profile(vault, scope)
+        if f.confidence >= min_confidence and not f.is_expired(on)
+    ]
     todos = [t for t in load_todos(vault, scope) if t.status == "open"]
     entries = read_log(vault, limit=5)
 
@@ -1171,6 +1362,17 @@ def build_recap(
         lines.append("")
     if not facts and not todos and not entries:
         lines.append("*No vault memory recorded yet.*")
+        lines.append("")
+    elif not facts and not todos and all(e.verb == "INIT" for e in read_log(vault)):
+        # A vault that was set up and never used: say what to do first rather
+        # than replaying its creation line every session.
+        lines.append("## Getting started")
+        lines.append("")
+        lines.append(
+            "- The vault is empty. Save something worth keeping with `/wiki-capture`, "
+            "add documents with `/wiki-ingest <path>` (or drop drafts in `_raw/`), "
+            "and ask with `/wiki-query`."
+        )
         lines.append("")
 
     text = "\n".join(lines).rstrip() + "\n"
@@ -1269,7 +1471,7 @@ def migrate(vault: Path, *, link_format: str = "wikilink", backup: bool = True) 
     vault = _require_vault(vault)
     status = migration_status(vault)
     hot = vault / "hot.md"
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = clock.compact(clock.wiki_timezone(vault))
     backup_dir = vault / MIGRATION_BACKUP_DIR / f"pre-memory-migration-{stamp}"
     saved = []
 
@@ -1306,6 +1508,167 @@ def migrate(vault: Path, *, link_format: str = "wikilink", backup: bool = True) 
     }
 
 
+TIMEZONE_BACKUP_PREFIX = "pre-timezone-migration-"
+_TIMEZONE_SKIP_DIRS = frozenset({MIGRATION_BACKUP_DIR, "_archived"})
+_BARE_DATE_KEY_RE = re.compile(
+    r"^(?:created|updated|lifecycle_changed|reviewed_at|adopted):[ \t]*\"?\d{4}-\d{2}-\d{2}\"?[ \t]*$",
+    re.MULTILINE,
+)
+
+
+def _timezone_targets(vault: Path, skip: Sequence[str]) -> list:
+    """Every file the timezone migration may rewrite: pages, the memory files,
+    the ``_meta/`` tables, drafts in ``_raw/`` and ``_staging/``, and the
+    adoption record. Never ``_archives/`` (the backups), ``_raw/_archived/``
+    (source snapshots), hidden dirs, instruction files, ``.okignore`` matches,
+    or anything that is not Markdown — JSON ledgers keep their own stamps."""
+    import fnmatch
+
+    from obsidian_wiki.vault import _walk_md, is_instruction_file, okignore_patterns, okignored, skipped_dir
+
+    patterns = okignore_patterns(vault)
+    targets = []
+    for path in sorted(_walk_md(vault)):
+        rel = path.relative_to(vault)
+        if skipped_dir(rel, _TIMEZONE_SKIP_DIRS) or is_instruction_file(rel) or okignored(rel, patterns):
+            continue
+        targets.append(path)
+    adopted = vault / ADOPTED_REL
+    if adopted.is_file():
+        targets.append(adopted)
+    return [
+        path for path in targets
+        if not any(fnmatch.fnmatch(path.relative_to(vault).as_posix(), pattern) for pattern in skip)
+    ]
+
+
+def _timezone_target_zone(vault: Path, zone: str) -> str:
+    name = (zone or "").strip().strip("\"'")
+    if not name:
+        name = clock.timezone_name(vault)
+    if not name:
+        raise MemoryError_(
+            "no_timezone",
+            "no timezone to convert to: pass one (`memory timezone America/Detroit`) "
+            "or set `timezone:` in index.md first",
+        )
+    clock.parse_timezone(name)  # TimezoneError on an unknown name, before any file is read
+    return name
+
+
+def timezone_migration_plan(vault: Path, zone: str = "", *, skip: Sequence[str] = ()) -> dict:
+    """What ``migrate_timezone`` would change, without writing anything.
+
+    Every zoned stamp in every target file is re-rendered in the vault's zone
+    (or *zone*, which ``--apply`` would also record in ``index.md``). Bare dates
+    and naive stamps are counted and left alone.
+    """
+    vault = _require_vault(vault)
+    name = _timezone_target_zone(vault, zone)
+    tz = clock.parse_timezone(name)
+    files = []
+    stamps = naive_total = bare_total = 0
+    for path in _timezone_targets(vault, skip):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        _new, changes, naive = clock.convert_text(text, tz)
+        naive_total += naive
+        bare_total += len(_BARE_DATE_KEY_RE.findall(split_frontmatter(text)[0]))
+        if changes:
+            rel = path.relative_to(vault).as_posix()
+            files.append({
+                "path": rel,
+                "stamps": [{"line": c.line, "old": c.old, "new": c.new} for c in changes],
+            })
+            stamps += len(changes)
+    return {
+        "vault": str(vault),
+        "timezone": name,
+        "key_current": clock.timezone_name(vault),
+        "files": files,
+        "file_count": len(files),
+        "stamp_count": stamps,
+        "naive_skipped": naive_total,
+        "bare_dates": bare_total,
+        "skip": list(skip),
+    }
+
+
+def migrate_timezone(vault: Path, zone: str = "", *, skip: Sequence[str] = (), backup: bool = True) -> dict:
+    """Rewrite every zoned stamp in the vault in its zone, with a backup first.
+
+    Under the memory lock: the original of every file that will change is
+    copied to ``_archives/pre-timezone-migration-<stamp>/<same path>``, the
+    key is recorded in ``index.md`` when *zone* was given, the files are
+    rewritten atomically, and one ``TIMEZONE`` line is appended to the log —
+    in the new zone, after the log itself was converted. Re-running is a
+    no-op: a stamp already in the zone renders identically.
+    """
+    vault = _require_vault(vault)
+    name = _timezone_target_zone(vault, zone)
+    tz = clock.parse_timezone(name)
+    backup_dir = vault / MIGRATION_BACKUP_DIR / f"{TIMEZONE_BACKUP_PREFIX}{clock.compact(tz)}"
+    index = vault / "index.md"
+    files = []
+    stamps = naive_total = bare_total = 0
+    saved: list = []
+
+    def _save(path: Path, text: str) -> None:
+        if not backup:
+            return
+        target = backup_dir / path.relative_to(vault)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(target, text)
+        saved.append(path.relative_to(vault).as_posix())
+
+    with memory_lock(vault):
+        set_key = bool(zone.strip()) and clock.timezone_name(vault) != name
+        if set_key and index.is_file():
+            _save(index, index.read_text(encoding="utf-8"))
+            clock.set_timezone(vault, name)
+        for path in _timezone_targets(vault, skip):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            new_text, changes, naive = clock.convert_text(text, tz)
+            naive_total += naive
+            bare_total += len(_BARE_DATE_KEY_RE.findall(split_frontmatter(text)[0]))
+            if not changes:
+                continue
+            rel = path.relative_to(vault).as_posix()
+            if rel not in saved:
+                _save(path, text)
+            atomic_write(path, new_text)
+            files.append({
+                "path": rel,
+                "stamps": [{"line": c.line, "old": c.old, "new": c.new} for c in changes],
+            })
+            stamps += len(changes)
+        line = append_log(
+            vault,
+            "TIMEZONE",
+            {
+                "zone": name,
+                "files": len(files),
+                "stamps": stamps,
+                "backup": f"{MIGRATION_BACKUP_DIR}/{backup_dir.name}" if saved else "",
+            },
+            lock=False,
+        )
+
+    return {
+        "vault": str(vault),
+        "timezone": name,
+        "key_set": set_key,
+        "files": files,
+        "file_count": len(files),
+        "stamp_count": stamps,
+        "naive_skipped": naive_total,
+        "bare_dates": bare_total,
+        "skip": list(skip),
+        "backup": saved,
+        "backup_dir": str(backup_dir) if saved else "",
+        "log_line": line,
+    }
+
+
 def memory_status(vault: Path) -> dict:
     """Machine-readable health of the memory surface."""
     vault = _require_vault(vault)
@@ -1316,6 +1679,8 @@ def memory_status(vault: Path) -> dict:
     todos = load_todos(vault)
     return {
         "vault": str(vault),
+        "transaction_pending": (vault / ".memory-transaction.json").exists(),
+        "timezone": clock.timezone_name(vault) or "UTC",
         "pages": index_drift.total,
         "index_drift": {
             "added": list(index_drift.added),
@@ -1330,6 +1695,8 @@ def memory_status(vault: Path) -> dict:
             "max_words": hot_max_words(),
             "over_budget": content_words(hot_text) > hot_max_words(),
             "generated": bool(hot_values.get("generated_by")),
+            "takeaways": _section_body(hot_text, "Key Takeaways"),
+            "takeaways_sha256": _takeaways_revision(hot_text),
         },
         "migrated": is_adopted(vault) or (is_generated(vault / "index.md") and is_generated(hot)),
         "profile_facts": len(load_profile(vault)),
@@ -1339,3 +1706,53 @@ def memory_status(vault: Path) -> dict:
             "closed": sum(1 for t in todos if t.status != "open"),
         },
     }
+
+
+def sync_memory(vault: Path, verb: Optional[str] = None, fields: Optional[dict] = None, *,
+                takeaways: Optional[str] = None, expected_takeaways_sha256: Optional[str] = None,
+                link_format: str = "wikilink", max_words: Optional[int] = None,
+                operation_id: Optional[str] = None, check: bool = False) -> dict:
+    """Validate under memory_lock; commit log/index/hot with rollback/recovery."""
+    from .memory_transaction import commit
+    vault = _require_vault(vault)
+    expected_takeaways_sha256 = expected_takeaways_sha256 or None
+    lock = advisory_lock(vault / MEMORY_LOCK_NAME) if check else memory_lock(vault)
+    with lock:
+        if check and (vault / ".memory-transaction.json").exists():
+            raise MemoryError_("memory_recovery_required", "pending transaction; let an official writer recover before preview")
+        fields = dict(fields or {})
+        if {"memory_operation_id", "memory_request_sha256"} & fields.keys():
+            raise MemoryError_("memory_reserved_field", "memory operation fields are reserved")
+        request_hash = hashlib.sha256(json.dumps(
+            [verb, fields, takeaways, expected_takeaways_sha256, link_format, max_words],
+            sort_keys=True).encode()).hexdigest()
+        if operation_id is not None:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", operation_id) or not verb:
+                raise MemoryError_("memory_operation_invalid", "operation ID requires a verb and 1-64 safe characters")
+            for entry in read_log(vault):
+                if entry.fields.get("memory_operation_id") == operation_id:
+                    if entry.fields.get("memory_request_sha256") != request_hash:
+                        raise MemoryError_("memory_operation_conflict", "operation ID belongs to another request")
+                    return {"line": entry.raw, "index": None, "hot": None, "skipped": "", "already_applied": True}
+            fields.update(memory_operation_id=operation_id, memory_request_sha256=request_hash)
+        line = format_log_line(verb, fields, timestamp=now_stamp(vault)) if verb else ""
+        for name in ("index.md", "hot.md"):
+            if not (is_adopted(vault) or is_generated(vault / name)):
+                if takeaways is not None or expected_takeaways_sha256 is not None:
+                    raise MemoryError_("unmigrated", "run memory migrate before replacing curated takeaways")
+                if verb and not check:
+                    append_log(vault, verb, fields, lock=False)
+                return {"line": line, "index": None, "hot": None,
+                        "skipped": "unmigrated memory: run memory migrate", "already_applied": False}
+        index = rebuild_index(vault, write=False, lock=False, link_format=link_format)
+        hot = build_hot(vault, takeaways=takeaways, expected_takeaways_sha256=expected_takeaways_sha256,
+                        pending_log_line=line, link_format=link_format, max_words=max_words)
+        path = vault / "log.md"
+        old_log = path.read_text(encoding="utf-8") if path.exists() else None
+        log = old_log if old_log is not None else chr(10).join(['---', 'title: Wiki Log', '---', '', '# Wiki Log', '', ''])
+        if line:
+            log += ("" if not log or log.endswith(chr(10)) else chr(10)) + line + chr(10)
+        if not check:
+            commit(vault, {"log.md": log if line or old_log is not None else None,
+                           "index.md": index.text, "hot.md": hot.text})
+        return {"line": line, "index": index, "hot": hot, "skipped": "", "already_applied": False}

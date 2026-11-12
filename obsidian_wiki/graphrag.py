@@ -35,8 +35,6 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 _FRONT_RE = re.compile(r"^---\n(.*?)\n---", re.DOTALL)
-_TAGS_RE = re.compile(r"^tags:\s*\[([^\]]+)\]", re.MULTILINE)
-_TAGS_LIST_RE = re.compile(r"^tags:\s*\n((?:\s+-\s+\S+\n)+)", re.MULTILINE)
 _CATEGORY_RE = re.compile(r"^category:\s*(\w+)", re.MULTILINE)
 _TIER_RE = re.compile(r"^tier:\s*(\w+)", re.MULTILINE)
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:[|#][^\]]*?)?\]\]")
@@ -46,13 +44,17 @@ _MD_LINK_RE = re.compile(
     r"\[.*?\]\((?![A-Za-z][A-Za-z0-9+.-]*:)([^)#\s]+\.md)(?:[#\s][^)]*)?\)"
 )
 
+from obsidian_wiki import clock  # noqa: E402
 from obsidian_wiki.graph_analysis import (  # noqa: E402
     SKIP_DIRS,
     SKIP_ROOT_FILES,
+    _node_for,
     _slug,
+    frontmatter_tags,
     iter_pages,
     shortest_path,
 )
+from obsidian_wiki.links import PageIndex, strip_code  # noqa: E402
 from obsidian_wiki.provenance import archive_wikilink_relpath  # noqa: E402
 from obsidian_wiki.vault import BLOCK_SCALAR_RE  # noqa: E402
 from obsidian_wiki.temporal import is_current, parse_date, superseded_target  # noqa: E402
@@ -107,10 +109,12 @@ def build_index(vault: Path) -> dict[str, dict]:
     # including it made almost any two pages look 2 hops apart and produced
     # meaningless "A -> index -> B" paths.
     md_files = iter_pages(vault)
+    rels = {page: page.relative_to(vault).as_posix() for page in md_files}
+    page_index = PageIndex(rels.values())
 
     # First pass: collect all slugs and frontmatter
     for page in md_files:
-        slug = _slug(page.stem)
+        slug = page_index.id_for(rels[page])
         try:
             text = page.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -121,18 +125,11 @@ def build_index(vault: Path) -> dict[str, dict]:
 
         title = _extract_scalar(front, "title")
 
-        tags: list[str] = []
-        m = _TAGS_RE.search(front)
-        if m:
-            tags = [t.strip().strip("'\"") for t in m.group(1).split(",")]
-        else:
-            m2 = _TAGS_LIST_RE.search(front)
-            if m2:
-                tags = [ln.strip().lstrip("- ") for ln in m2.group(1).splitlines() if ln.strip()]
+        tags = frontmatter_tags(front)
 
         summary = _extract_scalar(front, "summary")
 
-        category = str(page.relative_to(vault).parent)
+        category = page.relative_to(vault).parent.as_posix()
         m = _CATEGORY_RE.search(front)
         if m:
             category = m.group(1).strip()
@@ -148,7 +145,7 @@ def build_index(vault: Path) -> dict[str, dict]:
             "summary": summary,
             "category": category,
             "tier": tier,
-            "path": str(page.relative_to(vault)),
+            "path": page.relative_to(vault).as_posix(),
             # Event-time validity (see obsidian_wiki.temporal). Absent on every
             # page that doesn't opt in, which `is_current` reads as "current".
             "valid_from": _extract_scalar(front, "valid_from"),
@@ -161,18 +158,18 @@ def build_index(vault: Path) -> dict[str, dict]:
     # Second pass: extract wikilinks
     known = set(pages.keys())
     for page in md_files:
-        slug = _slug(page.stem)
+        slug = page_index.id_for(rels[page])
         if slug not in pages:
             continue
         try:
-            text = page.read_text(encoding="utf-8", errors="replace")
+            text = strip_code(page.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             continue
 
         for link in _WIKILINK_RE.findall(text):
             if archive_wikilink_relpath(vault, link) is not None:
                 continue
-            target = _slug(link.split("/")[-1])
+            target = page_index.resolve(link, rels[page])
             if target and target != slug and target in known:
                 pages[slug]["out_links"].append(target)
                 pages[target]["in_links"].append(slug)
@@ -180,7 +177,7 @@ def build_index(vault: Path) -> dict[str, dict]:
         for href in _MD_LINK_RE.findall(text):
             if archive_wikilink_relpath(vault, href) is not None:
                 continue
-            target = _slug(Path(href).stem)
+            target = page_index.resolve(href, rels[page])
             if target and target != slug and target in known:
                 pages[slug]["out_links"].append(target)
                 pages[target]["in_links"].append(slug)
@@ -439,12 +436,10 @@ def _outgoing_from_index(index: dict[str, dict]) -> dict[str, list[str]]:
 
 def _resolve_page(index: dict[str, dict], term: str) -> str | None:
     """Resolve a free-text page reference to a slug, falling back to ranking."""
-    slug = _slug(term)
-    if slug in index:
-        return slug
-    slug = _slug(term.strip().strip("`\"'.,"))
-    if slug in index:
-        return slug
+    for candidate in (term, term.strip().strip("`\"'.,")):
+        slug = _node_for(index, candidate)
+        if slug in index:
+            return slug
     cands = rank_candidates(index, [term], top_n=1)
     return cands[0]["slug"] if cands else None
 
@@ -625,8 +620,17 @@ def query(
     # retrieval but stay in the graph, so nothing is lost and `--as-of` can
     # bring them back. `parse_date` raises on a malformed `as_of`, which is
     # the caller's typo and should not be swallowed.
+    # Default "today" follows the vault calendar, while the reported `as_of`
+    # stays null unless the caller supplied a date.
     as_of_date = parse_date(as_of) if isinstance(as_of, str) else as_of
-    retrievable = index if include_historical else current_pages(index, as_of_date)
+    when = as_of_date
+    if when is None and not include_historical:
+        try:
+            tz = clock.wiki_timezone(vault)
+        except clock.TimezoneError:
+            tz = None  # a typo'd `timezone:` is lint's to report; retrieval keeps answering on UTC
+        when = parse_date(clock.today(tz))
+    retrievable = index if include_historical else current_pages(index, when)
     temporal = {
         "as_of": as_of_date.isoformat() if as_of_date else None,
         "include_historical": include_historical,
@@ -647,8 +651,8 @@ def query(
 
     path_result: list[str] = []
     if answer_type == "path" and len(terms) >= 2:
-        src_slug = _slug(terms[0])
-        tgt_slug = _slug(terms[1])
+        src_slug = _node_for(index, terms[0])
+        tgt_slug = _node_for(index, terms[1])
         # Try to find slugs by scoring if exact match fails
         if src_slug not in index:
             cands = rank_candidates(index, [terms[0]], top_n=1)

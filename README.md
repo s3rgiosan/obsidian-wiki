@@ -1,6 +1,6 @@
 <h1 align="center">obsidian-wiki</h1>
 
-<p align="center"><b>A digital brain you grow with your AI agent.</b></p>
+<p align="center"><b>A unified digital brain you grow with your AI agents.</b></p>
 
 <p align="center">
   It remembers what you figure out, connects it to what you already know,<br>
@@ -67,6 +67,12 @@ Plugin skills are namespaced (`/obsidian-wiki:wiki-ingest`), and the plugin ship
 Other paths — `git clone`, Claude Code plugin, Skills CLI, multiple vaults → **[Installation](https://github.com/Ar9av/obsidian-wiki/blob/main/docs/installation.md)**
 
 ## What you actually do
+
+<p align="center">
+  <img width="760" alt="The loop: feed it, it compiles into linked pages, ask it, keep it honest; every session starts from what the last one left behind" src="https://raw.githubusercontent.com/Ar9av/obsidian-wiki/main/assets/loop.svg" />
+</p>
+
+**Start with three.** `/wiki-setup` once, `/wiki-capture` to save what you just worked out, `/wiki-query` to get it back. Everything below is there when you need it.
 
 **Feed it.** Anything text-shaped: docs, PDFs, chat exports, meeting transcripts, screenshots, URLs.
 
@@ -151,7 +157,14 @@ More → **[Memory Surface](https://github.com/Ar9av/obsidian-wiki/blob/main/doc
 - **Queries stay cheap as it grows.** Titles, tags, and summaries get read before page bodies. 20 pages or 2000, roughly the same cost.
 - **It's yours.** Plain markdown in a folder. Push it to a private repo, open it in Obsidian, grep it, delete it. No service, no lock-in, nothing leaves your machine.
 - **It carries context across sessions.** An owner profile, open threads, and a running snapshot get injected at session start, so you don't re-explain yourself.
-- **Works where you already work.** One `.skills/` directory, symlinked into every agent you use.
+- **Works where you already work.** One `skills/` directory, symlinked into every agent you use.
+
+**What it isn't**
+
+- **Not a transcript recorder.** Nothing is saved unless you or a skill decides it's worth keeping. The end-of-session hook only suggests a capture.
+- **Not a sync service or a backup.** It's a folder. Put it in git or your own sync.
+- **Not an oracle.** Pages are as good as their sources. Inferred claims are marked, and lint flags pages drifting into guesswork.
+- **Not a file converter.** Your agent reads text, PDFs, and images itself. Audio and video are skipped, and Office files depend on your agent. [What each input actually gets](https://github.com/Ar9av/obsidian-wiki/blob/main/docs/architecture.md#what-each-input-actually-gets)
 
 More → **[Architecture](https://github.com/Ar9av/obsidian-wiki/blob/main/docs/architecture.md)**
 

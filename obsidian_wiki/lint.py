@@ -11,6 +11,7 @@ from typing import Any
 from obsidian_wiki.cache import _iter_entries, _load_manifest
 from obsidian_wiki.graph_analysis import _page_slug as graph_page_slug
 from obsidian_wiki.graph_analysis import iter_pages as iter_graph_pages
+from obsidian_wiki.links import PageIndex, strip_code
 from obsidian_wiki.provenance import (
     archive_wikilink_relpath,
     clip_url_index,
@@ -19,7 +20,7 @@ from obsidian_wiki.provenance import (
     parse_snapshots_field,
 )
 from obsidian_wiki.vault import SKIP_DIRS as VAULT_SKIP_DIRS
-from obsidian_wiki.vault import iter_md, split_frontmatter
+from obsidian_wiki.vault import iter_instruction_files, iter_md, okignore_patterns, okignored, split_frontmatter
 from obsidian_wiki.temporal import (
     SUPERSEDED_FIELD,
     superseded_target,
@@ -52,6 +53,10 @@ TRUST_REQUIRED_FRONTMATTER = (
     "lifecycle",
 )
 RESERVED_PAGE_STEMS = frozenset({"index", "log", "hot", "_insights"})
+# Obsidian's renderer runs out of heap opening a Markdown file of roughly 1-2 MB
+# and the window goes blank (#311: ~900 KB opened, ~2 MB crashed). No wiki page
+# should come near this; it catches raw conversions written as one page.
+OVERSIZED_PAGE_BYTES = 1_000_000
 ALLOWED_RELATIONSHIP_TYPES = frozenset(
     {"extends", "implements", "contradicts", "derived_from", "uses", "replaces", "related_to"}
 )
@@ -69,6 +74,26 @@ _RELATIONSHIP_LIST_FIELD_RE = re.compile(
 _RELATIONSHIP_ITEM_START_RE = re.compile(r"^\s*-\s*(?:#.*)?$")
 _RELATIONSHIP_FIELD_RE = re.compile(r"^\s+(type|target):\s*(.*?)\s*$")
 _WINDOWS_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
+# Freshness: a count or amount with no date beside it reads as true forever
+# and silently rots ("23 stars", "the pipeline has 13 deals"). Every such fact
+# should be stamped `(as of YYYY-MM-DD)`, live in a dated note or under a
+# dated heading, or point at where the truth lives.
+# ponytail: fixed noun list tuned for precision; widen it if real vaults miss claims.
+_UNDATED_CLAIM_RE = re.compile(
+    r"\b\d+(?:[.,]\d+)*\s*[km]?\+?\s*(?:★|\s(?:open\s+|active\s+|paying\s+)?"
+    r"(?:users|customers|clients|deals|stars|subscribers|downloads|members|employees|"
+    r"tickets|PRs|pull requests|followers|signups|installs)\b)",
+    re.IGNORECASE,
+)
+_UNDATED_MONEY_RE = re.compile(
+    r"\b(?:MRR|ARR|revenue|balance|runway)\b[^.\n]{0,20}?\b(?:is|of|at)\s+[$€£]?\s?\d",
+    re.IGNORECASE,
+)
+_DATE_HINT_RE = re.compile(r"\b(?:19|20)\d{2}\b|\bas of\b", re.IGNORECASE)
+_HEADING_RE = re.compile(r"^(#{1,6})\s")
+_FENCE_LINE_RE = re.compile(r"^\s*(```|~~~)")
+_INLINE_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+_DATED_STEM_RE = re.compile(r"^(?:19|20)\d{2}-\d{2}")
 
 
 def _frontmatter_field_block(frontmatter: str, field: str) -> str:
@@ -212,6 +237,18 @@ def _parse_relationships(frontmatter: str) -> list[dict[str, str]]:
     return relationships
 
 
+def _display_target(raw: str) -> str:
+    """How a broken link is reported: the slugged last segment, sans `.md`."""
+    name = raw.rstrip("\\").split("/")[-1]
+    return _slug(name[:-3] if name.lower().endswith(".md") else name)
+
+
+def _relationship_link(raw: str) -> str:
+    """A `relationships:` target as a bare link target (no brackets, alias, anchor)."""
+    target = raw.strip().strip("\"'").removeprefix("[[").removesuffix("]]")
+    return target.split("|", 1)[0].split("#", 1)[0].strip()
+
+
 def _normalise_node_id(raw: str) -> str:
     target = raw.strip().removeprefix("[[").removesuffix("]]")
     target = target.split("|", 1)[0].split("#", 1)[0].strip()
@@ -243,15 +280,54 @@ def _wikilink_page_target(raw: str) -> str | None:
     return name
 
 
+def _undated_claims(body: str, first_line: int) -> list[dict[str, Any]]:
+    """Lines claiming a current count or amount with no date to anchor it."""
+    claims: list[dict[str, Any]] = []
+    in_fence = False
+    dated_level: int | None = None
+    for offset, line in enumerate(body.splitlines()):
+        if _FENCE_LINE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence or line.lstrip().startswith(">"):
+            continue
+        heading = _HEADING_RE.match(line)
+        if heading:
+            level = len(heading.group(1))
+            if _DATE_HINT_RE.search(line):
+                dated_level = level if dated_level is None else min(dated_level, level)
+            elif dated_level is not None and level <= dated_level:
+                dated_level = None
+            continue
+        if dated_level is not None:
+            continue
+        prose = _INLINE_CODE_SPAN_RE.sub("", line)
+        if _DATE_HINT_RE.search(prose):
+            continue
+        if _UNDATED_CLAIM_RE.search(prose) or _UNDATED_MONEY_RE.search(prose):
+            claims.append({"line": first_line + offset, "text": line.strip()[:160]})
+    return claims
+
+
 def _parse_page(path: Path, vault: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8", errors="replace")
-    frontmatter = split_frontmatter(text)[0]
+    frontmatter, body = split_frontmatter(text)
+    relative_parts = path.relative_to(vault).parts
+    dated_page = relative_parts[0] == "journal" or bool(_DATED_STEM_RE.match(path.stem))
+    undated = (
+        []
+        if dated_page
+        else _undated_claims(body, text[: len(text) - len(body)].count("\n") + 1)
+    )
     fields = set(_FIELD_RE.findall(frontmatter))
     values = _parse_frontmatter_values(frontmatter)
     relative = path.relative_to(vault)
 
+    # Raw targets, resolved per page in `lint_vault` against the whole vault
+    # (`PageIndex`), so a project-relative link resolves like Obsidian does.
     links: list[str] = []
     broken_archive_links: list[dict[str, str]] = []
+    text = strip_code(text)
     for raw in _WIKILINK_RE.findall(text):
         archive_rel = archive_wikilink_relpath(vault, raw)
         if archive_rel is not None:
@@ -260,10 +336,8 @@ def _parse_page(path: Path, vault: Path) -> dict[str, Any]:
                     {"page": relative.as_posix(), "target": archive_rel}
                 )
             continue
-        name = _wikilink_page_target(raw)
-        target = _slug(name) if name else ""
-        if target:
-            links.append(target)
+        if _wikilink_page_target(raw) and raw.strip():
+            links.append(raw.strip().rstrip("\\"))
     for href in _MD_LINK_RE.findall(text):
         archive_rel = archive_wikilink_relpath(vault, href)
         if archive_rel is not None:
@@ -272,9 +346,7 @@ def _parse_page(path: Path, vault: Path) -> dict[str, Any]:
                     {"page": relative.as_posix(), "target": archive_rel}
                 )
             continue
-        target = _slug(Path(href).stem)
-        if target:
-            links.append(target)
+        links.append(href)
 
     return {
         "path": relative.as_posix(),
@@ -282,6 +354,7 @@ def _parse_page(path: Path, vault: Path) -> dict[str, Any]:
         "slug": _slug(path.stem),
         "title": values.get("title", "").strip() or path.stem,
         "summary": values.get("summary", "").strip(),
+        "redirects_to": values.get("redirects_to", "").strip(),
         "fields": fields,
         "links": links,
         "relationships": _parse_relationships(frontmatter),
@@ -289,7 +362,13 @@ def _parse_page(path: Path, vault: Path) -> dict[str, Any]:
         "snapshots": parse_snapshots_field(_frontmatter_field_block(frontmatter, "snapshots")),
         "values": values,
         "archive_broken": broken_archive_links,
+        "undated_claims": undated,
     }
+
+
+# Manifest fields that list the pages a source produced (provenance.py reads
+# the first two; pages_updated is the same list for an update run).
+_COVERAGE_PAGE_KEYS = ("pages_produced", "pages_created", "pages_updated")
 
 
 def lint_vault(
@@ -316,23 +395,24 @@ def lint_vault(
         else TRUST_REQUIRED_FRONTMATTER
     )
     pages = [_parse_page(path, vault) for path in iter_md(vault, SKIP_DIRS)]
-    slug_index: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    node_index: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    page_index = PageIndex(
+        [page["path"] for page in pages]
+        + [path.relative_to(vault).as_posix() for path in iter_instruction_files(vault, SKIP_DIRS)]
+    )
     for page in pages:
-        slug_index[page["slug"]].append(page)
-        node_index[page["node_id"]].append(page)
-    by_slug = {slug: matches[0] for slug, matches in slug_index.items()}
+        page["id"] = page_index.id_for(page["path"])
+        page["resolved"] = [
+            (raw, page_index.resolve(raw, page["path"])) for raw in page["links"]
+        ]
     incoming: dict[str, int] = defaultdict(int)
 
     broken_links: list[dict[str, str]] = []
     for page in pages:
-        for target in page["links"]:
-            if target == page["slug"]:
-                continue
-            if target not in by_slug:
-                broken_links.append({"page": page["path"], "target": target})
-                continue
-            incoming[target] += 1
+        for raw, target in page["resolved"]:
+            if target is None:
+                broken_links.append({"page": page["path"], "target": _display_target(raw)})
+            elif target != page["id"]:
+                incoming[target] += 1
         broken_links.extend(page.get("archive_broken", []))
 
     missing_frontmatter = []
@@ -356,17 +436,24 @@ def lint_vault(
         except ValueError as exc:
             trust_metadata_errors.append({"page": page["path"], "issue": str(exc)})
 
-    # `graph_analysis` identifies a page by its slugged stem (`_page_slug`), so
-    # two pages with the same slugged stem are ONE node in the graph metrics:
-    # degree, communities, betweenness, and the `neighborhood` blast radius.
-    # `Vector Search.md` and `vector-search.md` collide, in one folder or two.
-    # Key this check with that module's own slug and page selection, borrowed
-    # rather than reimplemented, so the report keys as the merge does.
+    # Two pages with the same slugged stem make a bare `[[stem]]` link mean
+    # whichever is nearer to the linking page (`links.PageIndex`), which is
+    # easy to get wrong. Pages in different folders stay separate graph nodes;
+    # `Vector Search.md` beside `vector-search.md` still share one, since
+    # nothing distinguishes them. Key this check with the graph's own page
+    # selection so it reports exactly the pages the graph sees.
+    # Redirect stubs (wiki-dedup): a merged page keeps the secondary page's
+    # title and filename so old links stay usable, but it is not a content
+    # page. Stub paths are excluded from the duplicate checks below, and the
+    # pointers themselves are validated further down instead.
+    stub_paths = {page["path"] for page in pages if page["redirects_to"]}
+
     stem_index: dict[str, list[str]] = defaultdict(list)
     for graph_page in iter_graph_pages(vault):
-        stem_index[graph_page_slug(graph_page, vault)].append(
-            graph_page.relative_to(vault).as_posix()
-        )
+        graph_rel = graph_page.relative_to(vault).as_posix()
+        if graph_rel in stub_paths:
+            continue
+        stem_index[graph_page_slug(graph_page, vault)].append(graph_rel)
     duplicate_stems = [
         {"stem": stem, "pages": sorted(paths)}
         for stem, paths in sorted(stem_index.items())
@@ -375,6 +462,8 @@ def lint_vault(
 
     title_index: dict[str, list[str]] = defaultdict(list)
     for page in pages:
+        if page["path"] in stub_paths:
+            continue
         title_index[page["title"].strip().lower()].append(page["path"])
     duplicate_titles = [
         {"title": title, "pages": paths}
@@ -400,12 +489,27 @@ def lint_vault(
         if page["slug"] not in RESERVED_PAGE_STEMS and page["absolute_sources"]
     ]
 
+    # Every Markdown file Obsidian loads, so `_raw/` drafts and archived
+    # snapshots count too: they crash the app the same way a page does.
+    oversized_pages = []
+    for path in iter_md(vault, ()):
+        size = path.stat().st_size
+        if size > OVERSIZED_PAGE_BYTES:
+            oversized_pages.append({"page": path.relative_to(vault).as_posix(), "bytes": size})
+
+    undated_claims = [
+        {"page": page["path"], **claim}
+        for page in pages
+        if page["slug"] not in RESERVED_PAGE_STEMS
+        for claim in page["undated_claims"]
+    ]
+
     orphan_pages = []
     for page in pages:
         if page["slug"] in RESERVED_PAGE_STEMS:
             continue
-        outgoing = sum(1 for target in page["links"] if target in by_slug and target != page["slug"])
-        if outgoing == 0 and incoming.get(page["slug"], 0) == 0:
+        outgoing = sum(1 for _, target in page["resolved"] if target and target != page["id"])
+        if outgoing == 0 and incoming.get(page["id"], 0) == 0:
             orphan_pages.append(page["path"])
 
     manifest_sources = _load_manifest(vault)
@@ -414,20 +518,27 @@ def lint_vault(
         (key or "").startswith("url:") for key, _ in _iter_entries(manifest_sources)
     )
     url_index = clip_url_index(vault) if need_urls else None
+    okignore = okignore_patterns(vault)
     snapshot_mismatch = []
     for page in pages:
         if page["slug"] in RESERVED_PAGE_STEMS:
             continue
-        expected = expected_snapshots_for_page(
-            vault,
-            page["path"],
-            manifest_sources,
-            inverted=inverted,
-            url_index=url_index,
-        )
+        # An ignored archive neither appears in the report nor counts as a mismatch,
+        # whether the manifest or the page is the side still naming it.
+        expected = [
+            rel
+            for rel in expected_snapshots_for_page(
+                vault,
+                page["path"],
+                manifest_sources,
+                inverted=inverted,
+                url_index=url_index,
+            )
+            if not okignored(Path(rel), okignore)
+        ]
         if not expected:
             continue
-        actual = page["snapshots"]
+        actual = [rel for rel in page["snapshots"] if not okignored(Path(rel), okignore)]
         if set(expected) != set(actual):
             snapshot_mismatch.append(
                 {
@@ -437,6 +548,39 @@ def lint_vault(
                 }
             )
     snapshot_mismatch.sort(key=lambda item: item["page"])
+
+    # Source coverage: every ingested source should still map to a page that
+    # exists. A source whose page list is empty or points only at missing
+    # files was dropped somewhere between ingest and now (a failed write, a
+    # rename, a dedup), and nothing else would surface it. Entries with no
+    # page list at all (older count-only shapes) are skipped, not guessed at.
+    uncovered_sources: list[dict[str, Any]] = []
+    for key, entry in _iter_entries(manifest_sources):
+        listed = [
+            str(raw).strip().strip("[]")
+            for field in _COVERAGE_PAGE_KEYS
+            if isinstance(entry.get(field), list)
+            for raw in entry[field]
+            if raw
+        ]
+        if not any(isinstance(entry.get(field), list) for field in _COVERAGE_PAGE_KEYS):
+            continue
+        missing = sorted(
+            {
+                page
+                for page in listed
+                if not (vault / page).is_file() and not (vault / f"{page}.md").is_file()
+            }
+        )
+        if not listed or len(missing) == len(set(listed)):
+            uncovered_sources.append(
+                {
+                    "source": key or "",
+                    "issue": "no_pages" if not listed else "pages_missing",
+                    "missing": missing,
+                }
+            )
+    uncovered_sources.sort(key=lambda item: item["source"])
 
     typed_relationship_issues: list[dict[str, Any]] = []
     for page in pages:
@@ -463,8 +607,8 @@ def lint_vault(
                 )
                 continue
             target = _normalise_node_id(target_raw)
-            matches = node_index.get(target, []) if "/" in target else slug_index.get(target, [])
-            if len(matches) > 1:
+            link = _relationship_link(target_raw)
+            if page_index.is_ambiguous(link, page["path"]):
                 typed_relationship_issues.append(
                     {
                         "page": page["path"],
@@ -474,7 +618,7 @@ def lint_vault(
                     }
                 )
                 continue
-            resolved = matches[0] if matches else None
+            resolved = page_index.resolve(link, page["path"]) if link else None
             if resolved is None:
                 typed_relationship_issues.append(
                     {
@@ -484,7 +628,7 @@ def lint_vault(
                         "target": target,
                     }
                 )
-            elif resolved["node_id"] == page["node_id"]:
+            elif resolved == page["id"]:
                 typed_relationship_issues.append(
                     {
                         "page": page["path"],
@@ -510,17 +654,41 @@ def lint_vault(
         if not raw_successor:
             continue
         successor = _slug(superseded_target(raw_successor))
+        resolved_successor = page_index.resolve(successor, page["path"]) if successor else None
         if not successor:
             temporal_errors.append(
                 {"page": page["path"], "issue": f"empty {SUPERSEDED_FIELD} value"}
             )
-        elif successor == page["slug"]:
+        elif resolved_successor == page["id"]:
             superseded_dangling.append(
                 {"page": page["path"], "target": successor, "issue": "self_reference"}
             )
-        elif successor not in by_slug:
+        elif resolved_successor is None:
             superseded_dangling.append(
                 {"page": page["path"], "target": successor, "issue": "missing_target"}
+            )
+
+    # Redirect pointers get the same treatment as `superseded_by`: a stub
+    # whose target is gone strands every old link that relied on it, and a
+    # stub pointing at another stub (or itself) never reaches content.
+    redirect_issues: list[dict[str, str]] = []
+    pages_by_id = {page["id"]: page for page in pages}
+    for page in pages:
+        if page["path"] not in stub_paths:
+            continue
+        target = _relationship_link(page["redirects_to"])
+        resolved_redirect = page_index.resolve(target, page["path"]) if target else None
+        if resolved_redirect is None:
+            redirect_issues.append(
+                {"page": page["path"], "target": target, "issue": "missing_target"}
+            )
+        elif resolved_redirect == page["id"]:
+            redirect_issues.append(
+                {"page": page["path"], "target": target, "issue": "self_reference"}
+            )
+        elif pages_by_id[resolved_redirect]["path"] in stub_paths:
+            redirect_issues.append(
+                {"page": page["path"], "target": target, "issue": "redirect_chain"}
             )
 
     ledger_path = vault / TRUST_LEDGER_RELATIVE_PATH
@@ -554,11 +722,15 @@ def lint_vault(
         "missing_summaries": sorted(missing_summaries),
         "machine_path_sources": machine_path_sources,
         "snapshot_mismatch": snapshot_mismatch,
+        "uncovered_sources": uncovered_sources,
         "orphan_pages": sorted(orphan_pages),
+        "oversized_pages": oversized_pages,
+        "undated_claims": undated_claims,
         "typed_relationship_issues": typed_relationship_issues,
         # Sorted by page: these findings get diffed between CI runs.
         "temporal_errors": sorted(temporal_errors, key=lambda item: item["page"]),
         "superseded_dangling": sorted(superseded_dangling, key=lambda item: item["page"]),
+        "redirect_issues": sorted(redirect_issues, key=lambda item: item["page"]),
         "confidence_missing_fields": confidence_missing_fields,
         "trust_metadata_errors": trust_metadata_errors,
         "confidence_review_stale": trust_report["stale"] if trust_report else [],
@@ -611,9 +783,13 @@ def lint_vault(
                 "missing_summaries",
                 "machine_path_sources",
                 "snapshot_mismatch",
+                "uncovered_sources",
                 "orphan_pages",
+                "oversized_pages",
+                "undated_claims",
                 "typed_relationship_issues",
                 "superseded_dangling",
+                "redirect_issues",
             )
         )
         or trust_findings_present

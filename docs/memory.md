@@ -41,11 +41,32 @@ This is the distinction that matters most in daily use.
 
 **`index.md` is reconciled, not overwritten.** One section per category is regenerated from disk. The preamble and any section whose heading is not a category are preserved verbatim — a hand-written "Reading queue" survives, a stale entry for a deleted page does not.
 
+**Sub-wikis can be linked instead of inlined.** Add `index_folder_hubs: true` to the frontmatter of the root `index.md` and any folder that has its own `index.md` is listed once, as a link to that index with a page count, rather than page by page. Nested hubs collapse into the outermost one. This keeps the root index small in a vault made of per-project sub-wikis, and the setting travels with the vault because it lives in the file it controls.
+
 **`hot.md` is generated except for one slot.** `## Key Takeaways` is where a model records what it concluded, and it carries across every rebuild unless `--takeaways` replaces it. Everything else in that file is derived, and hand edits to it are overwritten.
 
 ![The generated hot cache](images/memory-hot-cache.png)
 
 The word cap is real. It defaults to 500, overridable with `OBSIDIAN_HOT_MAX_WORDS`, and counts content only — frontmatter and the generated-file note do not spend the budget. Over budget, sections drop in increasing order of value: activity lines first, then contradictions, then threads, and the takeaways are truncated last, because they are the only part written on purpose.
+
+## Timestamps and the vault's timezone
+
+Every stamp the writer puts in a vault — the bracketed time on a log line, `updated:` on `hot.md`, the dates on profile facts and todos, the adoption record, backup directory names — comes from one clock. By default it is UTC in the `Z` spelling (`2026-10-10T18:40:37Z`), which is what the writer has always produced.
+
+A vault can name its own zone in the frontmatter of `index.md` (`obsidian-wiki setup --timezone America/Detroit` writes it, and a brand-new vault created on a terminal is asked once):
+
+```yaml
+---
+title: Wiki Index
+timezone: America/Detroit
+---
+```
+
+From then on every new stamp carries that zone's offset for its own instant (`2026-10-10T14:40:37-04:00`, and `-05:00` once daylight saving ends), and a bare date is the calendar day there rather than in UTC — the difference that files an evening's work under tomorrow's date for anyone west of Greenwich. The key lives in the file it governs, like `index_folder_hubs`, so it travels with the vault and applies to the CLI, the server, and the Python API alike, whichever `.env` they resolved; `memory index` preserves the frontmatter, so it survives every rebuild. A misspelled zone fails the write with the name in the error instead of writing UTC under a local label.
+
+Skills write their own `created:` and `updated:` into pages. `obsidian-wiki memory now` prints the stamp to use (`--date` for the bare form), so an agent never has to know which zone the vault is in.
+
+The key governs new writes. To bring the vault's history along, `obsidian-wiki memory timezone America/Detroit` previews, per file, every existing stamp that would change — frontmatter, log lines, `hot.md`, page bodies, each converted by its own instant — and `--apply` copies every file it will touch to `_archives/pre-timezone-migration-<stamp>/`, records the key, rewrites the files, and logs one `TIMEZONE` line. Bare dates and naive stamps are left alone and counted; `--skip GLOB` protects a file whose stamps are quoted source text; a second run changes nothing. Details and flags in [CLI Reference → Timestamps](cli.md#timestamps).
 
 ## Adopting an existing vault
 
@@ -87,6 +108,7 @@ Three rules worth knowing:
 
 - **Only record what the user actually told you.** A durable fact about a person should never be inferred from a document that was ingested — that is the document's content, and it belongs on a page.
 - **Confidence is the writer's own calibration**, not a measurement. Stated outright is around 0.9; inferred from one session's behaviour is around 0.5.
+- **Time-bound facts take `--until YYYY-MM-DD`.** "Exams this weekend" drops out of the session recap once the date passes instead of being repeated for months; the row stays in the table until you `forget` it.
 - **Staleness is reported, never enforced.** An open thread untouched for 30 days is flagged in `memory todo list` and in the recap. Nothing closes it on your behalf.
 
 ### Who writes them
@@ -111,9 +133,15 @@ obsidian-wiki hooks install
 
 ![Session lifecycle](images/memory-session-lifecycle.png)
 
-`wiki-session-recap.sh` runs at SessionStart and prints the profile, open threads, and recent activity, which Claude Code adds to the session's context. Before it existed, every session started blind and the model had to remember to go read `hot.md`, which it mostly did not.
+`wiki-session-recap.sh` runs at SessionStart and prints the profile, open threads, and recent activity, which Claude Code adds to the session's context. Before it existed, every session started blind and the model had to remember to go read `hot.md`, which it mostly did not. On a vault that has been set up but not used yet, it prints a one-line "Getting started" hint (capture, ingest, query) instead, until the first real write.
 
 `wiki-stop-capture.sh` runs at Stop and nudges a `/wiki-capture --quick` when the session changed anything.
+
+`wiki-prompt-recall.sh` is an opt-in third hook, at UserPromptSubmit. On each prompt it adds up to 4 note links with their summaries, or nothing when no note clearly matches, which is most of the time. A note counts only when at least two words of the prompt match its title, aliases, tags, or summary. It is not installed by default because it touches every turn:
+
+```bash
+obsidian-wiki hooks install --only UserPromptSubmit
+```
 
 **Neither hook can fail a session.** Every error path — no vault configured, package not importable, vault directory missing, slow filesystem — exits 0 with no output. A hook that breaks session startup is worse than a hook that contributes nothing.
 
@@ -129,6 +157,8 @@ Tune or disable per session:
 | `WIKI_RECAP_TIMEOUT` | `10` | Seconds before the recap is abandoned |
 | `WIKI_RECAP_PROJECT` | *(auto)* | Override the scoped project (default: git repo name) |
 | `WIKI_STOP_CAPTURE` | *(on)* | `false` skips the end-of-session capture nudge |
+| `WIKI_PROMPT_RECALL` | *(on once registered)* | `false` silences the opt-in per-prompt recall hook |
+| `WIKI_RECALL_TIMEOUT` | `5` | Seconds before a per-prompt recall is abandoned |
 
 `HIVEMIND_CAPTURE=false` is the older spelling of `WIKI_STOP_CAPTURE=false` and is still honoured.
 
@@ -182,10 +212,40 @@ obsidian-wiki memory log QUERY query="how do transformers work" result_pages=4
 
 Do not touch `index.md`, `hot.md`, `_insights.md`, or `.manifest.json` from a read-only skill.
 
-The full procedure, including the verb list and the profile/todo rules, is in [`.skills/llm-wiki/references/MEMORY.md`](../.skills/llm-wiki/references/MEMORY.md).
+The full procedure, including the verb list and the profile/todo rules, is in [`skills/llm-wiki/references/MEMORY.md`](../skills/llm-wiki/references/MEMORY.md).
 
 ## Related
 
 - [CLI Reference → Memory surface](cli.md#memory-surface) — every flag
 - [Architecture](architecture.md) — where this sits in the ingest pipeline
 - [Configuration](configuration.md#session-hooks) — the hook variables
+
+## Durable takeaways: fail-closed update contract
+
+**Breaking safety changes:** generated activity/threads/contradictions may be trimmed; durable Key Takeaways never is. If it cannot fit the chosen cap (500 words by default), hot/sync raises takeaways_overflow BEFORE writing log/index/hot. Move detail to a knowledge page and supply a reviewed summary, or explicitly choose a larger --max-words. The framework never silently raises the cap or archives prose.
+
+Ordinary mechanical sync omits --takeaways and carries the current section forward under the existing official lock. No revision is needed. Explicit replacement of existing non-placeholder prose requires --expect-takeaways-sha256 (Python: expected_takeaways_sha256). First read the full current section and reconcile all still-valid conclusions; obtain hot.takeaways_sha256 from memory status --json for that reviewed snapshot. If it changes, review again rather than blindly retrying.
+
+~~~bash
+obsidian-wiki memory status --json --vault "$OBSIDIAN_VAULT_PATH"
+# Save hot.takeaways_sha256 as TAKEAWAYS_REVISION after reviewing its section.
+obsidian-wiki memory sync INGEST source="papers/attention.pdf" --takeaways "<reviewed replacement>" --expect-takeaways-sha256 "$TAKEAWAYS_REVISION" --operation-id "<stable-operation-id>" --vault "$OBSIDIAN_VAULT_PATH"
+~~~
+
+The revision is the SHA-256 of the UTF-8 canonical section body (surrounding whitespace stripped by the existing section parser), not the whole cache. Generated activity alone causes no narrative conflict. Missing revisions raise takeaways_revision_required with migration instructions; stale revisions raise takeaways_conflict under the lock. Initial empty/placeholder seeding remains compatible. Clearing/repeating existing prose still requires a revision.
+
+Python writes use rebuild_hot(..., expected_takeaways_sha256=revision) or sync_memory(vault, verb, fields, takeaways=..., expected_takeaways_sha256=revision, operation_id=...). build_hot is render-only; lock=False callers must hold memory_lock themselves.
+
+Optional --operation-id is sync-only. An identical request/ID returns already_applied: true without writes, even if its previous response was lost. Different content/options under the same ID raises memory_operation_conflict. Without an ID, every successful sync appends a new operation as before. Deduplication depends on retaining operation log history. No new manifest/idempotency database is added.
+
+## Interrupted memory sync and recovery
+
+All outputs are rendered/validated under the official lock BEFORE mutation. A durable vault-local .memory-transaction.json stores before/after bytes. Caught interruptions roll back uncommitted updates. After process death, the next official lock-owning writer recovers uncommitted bytes or completes committed cleanup before proceeding; the existing advisory lock's crash/staleness timeout still applies. Do not delete the journal or bypass a live lock.
+
+Recovery checks ALL targets first: unknown external edits raise memory_recovery_conflict while preserving the edits and journal. memory status --json reports transaction_pending without silently repairing. This is recoverable atomicity for cooperating lock users, NOT instantaneous multi-file snapshot isolation for unlocked readers/Obsidian: hard termination can leave a transient mixed on-disk view until recovery. Treat a pending journal as incomplete. Per-file replacement remains atomic. Filesystem corruption, lock-bypassing writers, and durability beyond filesystem fsync/rename guarantees are outside this contract. The private journal contains memory text and must not be publicly exported.
+
+Unmigrated curated vaults retain legacy log-only acceptance with a warning when no narrative replacement is requested; do not claim full synchronization for that mode. Explicit replacement on an unmigrated surface rejects before writing anything. No automatic migration or production repair is implied.
+
+New memory files and journals use private 0600 permissions; existing memory output mode bits are retained. hot --check and sync --check do not recover a pending transaction: they reject with memory_recovery_required without changing target files.
+
+The status JSON hot.takeaways body and hot.takeaways_sha256 are derived from the same file read: review that paired snapshot rather than reading a body and a later hash independently. A revision is content-based (not a monotonic history counter). Do not act on status while transaction_pending is true.

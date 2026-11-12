@@ -10,7 +10,7 @@
 #      default; legacy ~/.obsidian-wiki is honored if it already exists) as
 #      config, or config.<profile> when CLAUDE_PROFILE is set, so skills work
 #      from any project
-#   3. Symlinks .skills/* into each agent's expected skills directory:
+#   3. Symlinks skills/* into each agent's expected skills directory:
 #      Project-local:
 #        - .claude/skills/        (Claude Code)
 #        - .cursor/skills/        (Cursor)
@@ -34,7 +34,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SKILLS_DIR="$SCRIPT_DIR/.skills"
+SKILLS_DIR="$SCRIPT_DIR/skills"
 
 # install_skills <target_dir> <label> [relative|absolute] [skill-subset...]
 # "relative" requires target_dir under $SCRIPT_DIR and emits ../-prefixed
@@ -78,7 +78,7 @@ install_skills() {
     fi
     link_path="$target_dir/$skill_name"
     if [ "$mode" = "relative" ]; then
-      link_target="${rel_prefix}.skills/$skill_name"
+      link_target="${rel_prefix}skills/$skill_name"
     else
       link_target="${skill%/}"
     fi

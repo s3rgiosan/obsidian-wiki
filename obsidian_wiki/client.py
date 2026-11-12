@@ -41,10 +41,10 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence, Union
 
+from obsidian_wiki import clock as _clock
 from obsidian_wiki import memory as _mem
 
 DEFAULT_CATEGORY = "references"
@@ -212,7 +212,7 @@ class Memory:
 
         relative = f"{category}/{_slug(title.rstrip(chr(46)))}.md"
         target = _mem.resolve_in_vault(self.vault, relative) if hasattr(_mem, "resolve_in_vault") else self.vault / relative
-        today = date.today().isoformat()
+        today = _mem.today(_clock.wiki_timezone(self.vault))
         created = today
         if target.is_file():
             match = re.search(r"^created:\s*(\S+)", target.read_text(encoding="utf-8"), re.MULTILINE)
@@ -284,6 +284,7 @@ class Memory:
         *,
         confidence: float = 0.6,
         source: str = "agent",
+        until: str = "",
         user_id: Optional[str] = None,
     ) -> dict:
         """Record a durable fact about the person. Re-keying replaces it.
@@ -293,7 +294,7 @@ class Memory:
         """
         fact = _mem.set_fact(
             self.vault, key, value,
-            confidence=confidence, source=source, scope=self._scope(user_id),
+            confidence=confidence, source=source, until=until, scope=self._scope(user_id),
         )
         return dict(fact.__dict__)
 
@@ -372,3 +373,7 @@ class Memory:
 
     def status(self) -> dict:
         return _mem.memory_status(self.vault)
+
+    def now(self) -> str:
+        """The timestamp to write into a page: the vault's own zone (``timezone:`` in ``index.md``)."""
+        return _mem.now_stamp(self.vault)

@@ -45,9 +45,11 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from obsidian_wiki.links import PageIndex, strip_code
 from obsidian_wiki.provenance import archive_wikilink_relpath
 from obsidian_wiki.vault import SKIP_DIRS as VAULT_SKIP_DIRS
 from obsidian_wiki.vault import iter_md, okignore_patterns, okignored, skipped_dir  # noqa: F401 (re-exported)
+from obsidian_wiki.vault import split_frontmatter
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +63,25 @@ _MD_LINK_RE = re.compile(
     r"\[.*?\]\((?![A-Za-z][A-Za-z0-9+.-]*:)([^)#\s]+\.md)(?:[#\s][^)]*)?\)"
 )
 _TAGS_RE = re.compile(r"^tags:\s*\[([^\]]+)\]", re.MULTILINE)
-_TAGS_LIST_RE = re.compile(r"^tags:\s*\n((?:\s+-\s+\S+\n)+)", re.MULTILINE)
+_TAGS_LIST_RE = re.compile(r"^tags:[ \t]*\n((?:[ \t]*-[ \t]+\S+[ \t]*\n)+)", re.MULTILINE)
+
+
+def frontmatter_tags(frontmatter: str) -> list[str]:
+    """Tags declared in a frontmatter block, inline (`[a, b]`) or as a block list.
+
+    Pass the frontmatter only, never the whole page: a `tags:` line quoted in
+    the body would otherwise be read as the page's tags.
+    """
+    # The frontmatter splitters drop the newline before the closing `---`, and
+    # the block-list pattern needs one after every item, the last one included.
+    front = frontmatter + "\n"
+    m = _TAGS_RE.search(front)
+    if m:
+        return [t.strip().strip("'\"") for t in m.group(1).split(",")]
+    m = _TAGS_LIST_RE.search(front)
+    if m:
+        return [ln.strip().lstrip("- ") for ln in m.group(1).splitlines() if ln.strip()]
+    return []
 
 
 def _slug(page_name: str) -> str:
@@ -118,48 +138,44 @@ def parse_vault_graph(vault: Path) -> tuple[dict[str, list[str]], dict[str, list
     tags_map: dict[str, list[str]] = {}
 
     pages: list[Path] = iter_pages(vault)
-
-    known_slugs = {_page_slug(p, vault) for p in pages}
+    rels = {page: page.relative_to(vault).as_posix() for page in pages}
+    index = PageIndex(rels.values())
 
     for page in pages:
-        src = _page_slug(page, vault)
+        src = index.id_for(rels[page])
         try:
             text = page.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        links_text = strip_code(text)
 
         # Tags
-        m = _TAGS_RE.search(text)
-        if m:
-            tags_map[src] = [t.strip().strip("'\"") for t in m.group(1).split(",")]
-        else:
-            m2 = _TAGS_LIST_RE.search(text)
-            if m2:
-                tags_map[src] = [ln.strip().lstrip("- ") for ln in m2.group(1).splitlines() if ln.strip()]
+        tags = frontmatter_tags(split_frontmatter(text)[0])
+        if tags:
+            tags_map[src] = tags
 
         # Wikilinks
-        for link in _WIKILINK_RE.findall(text):
+        for link in _WIKILINK_RE.findall(links_text):
             if archive_wikilink_relpath(vault, link) is not None:
                 continue
-            target = _slug(link.split("/")[-1])
-            if target and target != src and target in known_slugs:
+            target = index.resolve(link, rels[page])
+            if target and target != src:
                 outgoing[src].append(target)
 
         # Markdown links (when OBSIDIAN_LINK_FORMAT=markdown)
-        for href in _MD_LINK_RE.findall(text):
+        for href in _MD_LINK_RE.findall(links_text):
             if archive_wikilink_relpath(vault, href) is not None:
                 continue
-            target = _slug(Path(href).stem)
-            if target and target != src and target in known_slugs:
+            target = index.resolve(href, rels[page])
+            if target and target != src:
                 outgoing[src].append(target)
 
         if src not in outgoing:
             outgoing[src] = []
 
     # Ensure every known page appears as a key
-    for p in pages:
-        s = _page_slug(p, vault)
-        outgoing.setdefault(s, [])
+    for page_id in index.ids():
+        outgoing.setdefault(page_id, [])
 
     return dict(outgoing), tags_map
 
@@ -579,6 +595,17 @@ def surprising_connections(
 # Path finding & neighbourhoods (graphify: `path`, `affected` blast radius)
 # ---------------------------------------------------------------------------
 
+def _node_for(outgoing: dict[str, list[str]], term: str) -> str:
+    """Node id for a page reference: an exact id, else the shortest id whose
+    path ends with it. Pages that share a name have path-qualified ids, so a
+    bare name has to be matched by suffix."""
+    term = "/".join(_slug(part) for part in term.strip().removesuffix(".md").split("/") if part)
+    if term in outgoing:
+        return term
+    matches = sorted((n for n in outgoing if n.endswith(f"/{term}")), key=lambda n: (n.count("/"), n))
+    return matches[0] if matches else term
+
+
 def shortest_path(
     outgoing: dict[str, list[str]],
     source: str,
@@ -587,7 +614,7 @@ def shortest_path(
 ) -> list[str] | None:
     """BFS shortest path between two pages. Follows links in either direction
     unless `directed=True`. Returns the node list, or None if unreachable."""
-    source, target = _slug(source), _slug(target)
+    source, target = _node_for(outgoing, source), _node_for(outgoing, target)
     if source not in outgoing or target not in outgoing:
         return None
     if source == target:
@@ -627,7 +654,7 @@ def neighborhood(
     the blast radius if this page is renamed/removed), or "both".
     Returns [{"page", "depth", "via"}] ordered by depth then name.
     """
-    seed = _slug(seed)
+    seed = _node_for(outgoing, seed)
     if seed not in outgoing:
         return []
     incoming: dict[str, set[str]] = defaultdict(set)

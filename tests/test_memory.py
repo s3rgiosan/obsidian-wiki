@@ -172,6 +172,25 @@ def test_index_honours_the_markdown_link_format(vault: Path) -> None:
     assert "[[" not in text
 
 
+def test_index_round_trips_names_a_wikilink_cannot_carry(vault: Path) -> None:
+    """`]`, `#` and `|` cannot appear in a wikilink target, so such entries render
+    as markdown links and the parser has to read them back as themselves (#294)."""
+    _page(vault, "concepts/2026-06[final].md", title="2026-06[final]")
+    _page(vault, "concepts/notes#1.md", title="notes#1")
+    mem.rebuild_index(vault)
+
+    text = (vault / "index.md").read_text(encoding="utf-8")
+    assert r"[2026-06[final\]](concepts/2026-06[final].md)" in text
+    assert "[notes#1](concepts/notes#1.md)" in text
+    assert "[[concepts/notes#1]]" not in text
+
+    result = mem.rebuild_index(vault, write=False)
+
+    assert result.added == ()
+    assert result.removed == ()
+    assert result.changed is False
+
+
 def test_index_drops_a_deleted_page_but_keeps_a_human_section(vault: Path) -> None:
     mem.rebuild_index(vault)
     index = vault / "index.md"
@@ -231,12 +250,75 @@ def test_index_ignores_staging_and_memory_files(vault: Path) -> None:
         assert excluded not in text
 
 
+def test_index_drift_ignores_links_inside_an_entry_summary(vault: Path) -> None:
+    """Only an entry's own link says what the index lists. A wikilink in the
+    page's summary text was counted too, so a summary pointing at a short-form
+    or not-yet-written page reported a phantom removal on every rebuild."""
+    _page(vault, "concepts/rag.md", title="RAG", summary='"See [[overview|the overview]] first"')
+    mem.rebuild_index(vault)
+    result = mem.rebuild_index(vault)
+    assert result.removed == ()
+    assert result.added == ()
+    assert result.changed is False
+
+
 def test_index_is_idempotent(vault: Path) -> None:
     mem.rebuild_index(vault)
     first = (vault / "index.md").read_text(encoding="utf-8")
     second = mem.rebuild_index(vault)
     assert second.changed is False
     assert second.text == first
+
+
+def _sub_wiki(vault: Path) -> None:
+    """projects/alpha is a sub-wiki: its own index.md plus pages under it."""
+    hub = vault / "projects/alpha/index.md"
+    hub.parent.mkdir(parents=True, exist_ok=True)
+    hub.write_text("# Alpha Project\n\nEverything about alpha.\n", encoding="utf-8")
+    _page(vault, "projects/alpha/concepts/plan.md", title="Plan", summary="The plan")
+    _page(vault, "projects/alpha/entities/bob.md", title="Bob", summary="A person")
+    _page(vault, "projects/alpha/deep/index.md", title="Deep", summary="A nested hub")
+
+
+def _enable_hubs(vault: Path) -> None:
+    (vault / "index.md").write_text(
+        f"---\ntitle: Wiki Index\n{mem.FOLDER_HUBS_KEY}: true\n"
+        f"generated_by: {mem.GENERATED_MARKER} index\n---\n\n# Wiki Index\n",
+        encoding="utf-8",
+    )
+
+
+def test_index_lists_sub_wiki_pages_individually_by_default(vault: Path) -> None:
+    _sub_wiki(vault)
+    text = mem.rebuild_index(vault).text
+    assert "[[projects/alpha/concepts/plan]]" in text
+    assert "(3 pages)" not in text
+
+
+def test_folder_hubs_link_a_sub_wiki_once_instead_of_inlining_it(vault: Path) -> None:
+    """A vault of sub-wikis would otherwise inline every page of every one of
+    them into the root index, which every skill reads at startup."""
+    _sub_wiki(vault)
+    _enable_hubs(vault)
+
+    result = mem.rebuild_index(vault)
+    text = (vault / "index.md").read_text(encoding="utf-8")
+    assert "- [[projects/alpha/index|Alpha Project]] — Everything about alpha. (3 pages)" in text
+    for inlined in ("projects/alpha/concepts/plan", "projects/alpha/entities/bob", "projects/alpha/deep"):
+        assert inlined not in text  # including the nested hub: the outermost wins
+    assert "[[concepts/attention]]" in text  # pages outside a hub are unaffected
+    assert result.total == 6
+    assert "projects/alpha/index" in result.added
+    assert f"{mem.FOLDER_HUBS_KEY}: true" in text  # the switch survives the rebuild
+    assert mem.rebuild_index(vault).changed is False
+
+
+def test_folder_hub_title_falls_back_to_the_folder_name(vault: Path) -> None:
+    hub = vault / "projects/beta-tool/index.md"
+    hub.parent.mkdir(parents=True)
+    hub.write_text("Just a list of links.\n", encoding="utf-8")
+    _enable_hubs(vault)
+    assert "[[projects/beta-tool/index|Beta Tool]]" in mem.rebuild_index(vault).text
 
 
 # --------------------------------------------------------------------------
@@ -262,7 +344,7 @@ def test_hot_preserves_key_takeaways_across_a_rebuild(vault: Path) -> None:
 
 def test_hot_replaces_takeaways_when_given_new_text(vault: Path) -> None:
     mem.rebuild_hot(vault, takeaways="Old conclusion.")
-    mem.rebuild_hot(vault, takeaways="New conclusion.")
+    mem.rebuild_hot(vault, takeaways="New conclusion.", expected_takeaways_sha256=mem.takeaways_revision(vault))
     text = (vault / "hot.md").read_text(encoding="utf-8")
     assert "New conclusion." in text and "Old conclusion." not in text
 
@@ -272,7 +354,7 @@ def test_hot_enforces_the_word_cap(vault: Path) -> None:
         mem.append_log(vault, "INGEST", {"source": f"file-{index}.pdf", "note": "a fairly long note value"})
     for index in range(20):
         mem.add_todo(vault, f"Thread number {index} with a reasonably long description")
-    result = mem.rebuild_hot(vault, takeaways=" ".join(["takeaway"] * 400), max_words=200, activity_limit=40)
+    result = mem.rebuild_hot(vault, takeaways=" ".join(["takeaway"] * 80), max_words=200, activity_limit=40)
     assert result.trimmed is True
     assert result.words <= 200
     assert mem.content_words((vault / "hot.md").read_text(encoding="utf-8")) <= 200
@@ -445,8 +527,31 @@ def test_recap_gathers_profile_threads_and_activity(vault: Path) -> None:
     assert "INGEST" in recap
 
 
+def test_recap_drops_a_time_bound_fact_once_it_is_over(vault: Path) -> None:
+    """"Exams this weekend" must not still be injected next month."""
+    mem.set_fact(vault, "exams", "this weekend", until="2000-01-02")
+    mem.set_fact(vault, "trip", "in Lisbon", until="2999-01-01")
+    facts = {f.key: f for f in mem.load_profile(vault)}
+    assert facts["exams"].until == "2000-01-02" and facts["exams"].is_expired()
+    recap = mem.build_recap(vault)
+    assert "exams" not in recap
+    assert "**trip**: in Lisbon" in recap
+    with pytest.raises(mem.MemoryError_) as excinfo:
+        mem.set_fact(vault, "k", "v", until="next friday")
+    assert excinfo.value.code == "bad_until"
+
+
 def test_recap_is_honest_about_an_empty_vault(vault: Path) -> None:
     assert "No vault memory recorded yet" in mem.build_recap(vault)
+
+
+def test_recap_suggests_a_first_step_until_the_vault_is_used(vault: Path) -> None:
+    mem.append_log(vault, "INIT", {"vault_path": str(vault)})
+    recap = mem.build_recap(vault)
+    assert "## Getting started" in recap and "/wiki-capture" in recap
+    mem.append_log(vault, "INGEST", {"source": "notes.md"})
+    assert "Getting started" not in mem.build_recap(vault)
+    assert "Getting started" not in mem.build_recap(vault, project="nomatch")
 
 
 def test_recap_filters_low_confidence_facts(vault: Path) -> None:

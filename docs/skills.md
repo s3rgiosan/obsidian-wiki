@@ -1,8 +1,18 @@
 # Skills Reference
 
-Everything lives in [`.skills/`](../.skills/). Each skill is a markdown file the agent reads when your request matches its description — there's no runtime, no plugin system, no registration step.
+Everything lives in [`skills/`](../skills/). Each skill is a markdown file the agent reads when your request matches its description — there's no runtime, no plugin system, no registration step.
 
 Slash commands (`/skill-name`) work in Claude Code, Cursor, Windsurf, and most CLI agents. Everywhere else, just describe what you want.
+
+## Start with three
+
+You need three skills to get value from the vault. Everything else on this page is there when you need it.
+
+| Skill | When |
+|---|---|
+| `wiki-setup` | Once, to create the vault |
+| `wiki-capture` | When a session produced something worth keeping |
+| `wiki-query` | When you want it back |
 
 ## Setup & vaults
 
@@ -33,7 +43,7 @@ Slash commands (`/skill-name`) work in Claude Code, Cursor, Windsurf, and most C
 
 | Skill | What it does | Slash command |
 |---|---|---|
-| `wiki-query` | Answer questions from the vault with citations. Tiered — reads summaries before page bodies | `/wiki-query` |
+| `wiki-query` | Answer questions from the vault with citations. Tiered — reads summaries before page bodies. Say "challenge this" to have it argue against a plan using your own past decisions and failures | `/wiki-query` |
 | `wiki-narrate` | Render a cited briefing, plain-language explanation, or progressive lecture from a topic | `/wiki-narrate <topic>` |
 | `wiki-digest` | Newsletter-style summary of what you learned over a day, week, or month | `/wiki-digest [period]` |
 | `wiki-context-pack` | Produce a token-bounded context slice for a downstream agent or skill | `/wiki-context-pack` |
@@ -98,7 +108,7 @@ This framework handles the knowledge-management workflow — ingest, query, lint
 npx skills add kepano/obsidian-skills
 ```
 
-Both projects follow the same [Agent Skills spec](https://agentskills.io/specification), so they coexist in the same `.skills/` directory with no conflicts.
+Both projects follow the same [Agent Skills spec](https://agentskills.io/specification), so they coexist in the same `skills/` directory with no conflicts.
 
 ## Writing your own
 
@@ -106,4 +116,4 @@ See [Contributing → Adding a new skill](contributing.md#adding-a-new-skill), o
 
 > "Create a skill that generates weekly summaries from my journal entries"
 
-`skill-creator` walks you through drafting, testing, and refining it in `.skills/`.
+`skill-creator` walks you through drafting, testing, and refining it in `skills/`.

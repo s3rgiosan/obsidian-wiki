@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import subprocess
 import sys
 
 import pytest
@@ -192,6 +193,76 @@ def test_staging_diffs_new_and_updated_pages(client, tmp_path):
     assert "-old" in update["diff"] and "+new" in update["diff"]
 
 
+def _git_in(vault, *args):
+    subprocess.run(
+        ["git", "-C", str(vault), "-c", "user.name=t", "-c", "user.email=t@e.test", *args],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_status_leaves_okignored_paths_out(client, tmp_path):
+    for rel in (
+        "concepts/kept page.md",
+        "concepts/\u0e42\u0e19\u0e49\u0e15.md",
+        "Private/secret-a.md",
+        "My Inbox/secret-\u0e01.md",
+        "_raw/note.md",
+        "_raw/quarantine/secret-b.md",
+        "_staging/private/secret-c.md",
+    ):
+        _page(tmp_path, rel)
+    # Distinct bodies, so git can't pair these two renames the other way round.
+    _page(tmp_path, "concepts/moved.md", "moved\n")
+    _page(tmp_path, "Private/secret-rename.md", "rename\n")
+    (tmp_path / ".okignore").write_text(
+        "Private/\nMy Inbox/\n_raw/quarantine\n_staging/private\n*.draft.md\n", encoding="utf-8"
+    )
+    _git_in(tmp_path, "init", "-q")
+    _git_in(tmp_path, "add", "-A")
+    _git_in(tmp_path, "commit", "-qm", "seed")
+    for rel in (
+        "concepts/kept page.md",
+        "concepts/\u0e42\u0e19\u0e49\u0e15.md",
+        "Private/secret-a.md",
+        "My Inbox/secret-\u0e01.md",
+    ):
+        _page(tmp_path, rel, "edited\n")
+    _page(tmp_path, "Private/secret-new.md")
+    _page(tmp_path, "notes/fresh.md")
+    # git would report this as `?? clients/secret-acme/`, which no file pattern matches.
+    _page(tmp_path, "clients/secret-acme/plan.draft.md")
+    _git_in(tmp_path, "mv", "concepts/moved.md", "concepts/renamed.md")
+    _git_in(tmp_path, "mv", "Private/secret-rename.md", "concepts/out-of-private.md")
+
+    response = client.get("/v1/status")
+    body = response.json()
+
+    assert "secret" not in response.text
+    assert body["raw_count"] == 1 and body["staging_count"] == 0
+    assert sorted(body["git"]["dirty"]) == sorted([
+        " M concepts/kept page.md",
+        " M concepts/\u0e42\u0e19\u0e49\u0e15.md",
+        "?? notes/fresh.md",
+        "R  concepts/moved.md -> concepts/renamed.md",
+        "R  (ignored) -> concepts/out-of-private.md",
+    ])
+    assert body["git"]["dirty_count"] == 5
+
+
+def test_staging_endpoint_does_not_diff_an_ignored_live_page(client, tmp_path):
+    _page(tmp_path, "concepts/kept.md", "kept\n")
+    _page(tmp_path, "_staging/concepts/kept.md", "revised\n")
+    _page(tmp_path, "Areas/Personal/page.md", "secret\n")
+    _page(tmp_path, "_staging/Areas/Personal/page.md", "revised\n")
+    (tmp_path / ".okignore").write_text("Areas/Personal/\n", encoding="utf-8")
+
+    response = client.get("/v1/staging")
+
+    assert "secret" not in response.text
+    assert response.json()["count"] == 1
+
+
 def test_health_reports_doctor_and_lint(client, tmp_path):
     _page(tmp_path, "concepts/a.md")
     body = client.get("/v1/health").json()
@@ -221,3 +292,60 @@ def test_bind_host_is_loopback_unless_asked(client, monkeypatch, wiki_host, expe
     monkeypatch.setattr(uvicorn, "run", lambda app, **kw: seen.update(kw))
     sys.modules["obsidian_wiki.server"].main()
     assert seen["host"] == expected
+
+
+MCP_LIST = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+# TestClient sends Host: testserver, which loopback rebinding protection refuses.
+MCP_HEADERS = {"accept": "application/json, text/event-stream", "host": "localhost:8080"}
+
+
+def test_mcp_needs_a_key(client):
+    """A mounted app skips route dependencies; /mcp must still refuse a keyless caller."""
+    assert client.post("/mcp/", json=MCP_LIST, headers=MCP_HEADERS).status_code == 200
+    client.headers.pop("authorization")
+    assert client.post("/mcp/", json=MCP_LIST, headers=MCP_HEADERS).status_code == 401
+    client.headers["authorization"] = "Bearer nope"
+    assert client.post("/mcp/", json=MCP_LIST, headers=MCP_HEADERS).status_code == 401
+
+
+def test_mcp_answers_a_lan_host_when_bound_to_every_interface(tmp_path, monkeypatch):
+    """WIKI_HOST=0.0.0.0 (the Docker image) must not 421 a request by LAN address (#266)."""
+    monkeypatch.setenv("OBSIDIAN_VAULT_PATH", str(tmp_path))
+    monkeypatch.setenv("WIKI_API_KEY", KEY)
+    monkeypatch.setenv("WIKI_HOST", "0.0.0.0")
+    sys.modules.pop("obsidian_wiki.server", None)
+    server = importlib.import_module("obsidian_wiki.server")
+    with TestClient(server.app) as c:
+        r = c.post("/mcp/", json=MCP_LIST, headers={
+            **MCP_HEADERS, "authorization": f"Bearer {KEY}", "host": "192.168.1.5:8080",
+        })
+    assert r.status_code == 200
+
+
+def test_mcp_subcommand_serves_the_vault_over_stdio(tmp_path, monkeypatch):
+    """`obsidian-wiki mcp` is what an agent launches; it needs no key and finds the vault."""
+    import anyio
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
+    (tmp_path / "concepts").mkdir()
+    (tmp_path / "concepts" / "tides.md").write_text(
+        "---\ntitle: Tides\nsummary: How the moon moves water.\n---\nThe moon pulls the sea.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("WIKI_API_KEY", raising=False)
+    monkeypatch.delenv("WIKI_ALLOW_ANONYMOUS", raising=False)
+    params = StdioServerParameters(
+        command=sys.executable, args=["-m", "obsidian_wiki", "mcp", "--vault", str(tmp_path)],
+    )
+
+    async def run():
+        async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+            await session.initialize()
+            names = {t.name for t in (await session.list_tools()).tools}
+            page = await session.call_tool("memory_read", {"path": "concepts/tides.md"})
+            return names, page
+
+    names, page = anyio.run(run)
+    assert {"memory_search", "memory_read", "memory_write"} <= names
+    assert "The moon pulls the sea." in page.content[0].text

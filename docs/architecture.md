@@ -12,6 +12,20 @@ Every time you feed the brain, it runs through these:
 
 The agent reads your source material directly — markdown, PDFs (with page ranges), JSONL conversation exports, plain text logs, chat exports, meeting transcripts, and images (screenshots, whiteboard photos, diagrams; vision-capable model required). No preprocessing step, no pipeline to run. The agent reads the file the same way it reads code.
 
+#### What each input actually gets
+
+| Input | What happens |
+|---|---|
+| Markdown, text, HTML, YAML | Read and distilled directly |
+| PDF | Read in page ranges. Scanned pages are read as images. Long PDFs can be pre-indexed with PageIndex (optional) |
+| Images and screenshots | Read with your agent's vision, so a vision-capable model is required. Most of what comes out is marked `^[inferred]` |
+| JSON, CSV, chat exports | Parsed first (ChatGPT, Slack, Discord, transcripts), then distilled |
+| URLs | Fetched with `defuddle` or your agent's web fetch, or the `firecrawl` CLI (else Jina Reader) for PDFs and JavaScript-rendered pages; the snapshot is kept in `_raw/` |
+| Code | Distilled into architecture and decisions, not code listings. `/wiki-update` uses the code graph when one is available |
+| Agent histories | Claude Code, Codex, Copilot, Hermes, OpenClaw, and Pi via `/wiki-history-ingest` |
+| Office files (`.docx`, `.xlsx`, `.pptx`) | Planned for ingest, but only as good as your agent's ability to read them. Export to PDF or markdown for reliable results |
+| Audio, video, archives, binaries | Skipped. Transcribe or extract to text first |
+
 ### 2. Pull information
 
 From the raw source, the agent pulls out concepts, entities, claims, relationships, and open questions. A conversation about debugging a React hook yields a "stale closure" pattern. A research paper yields the key idea and its caveats. A work log yields decisions and their rationale. Noise gets dropped, signal gets kept.
@@ -41,7 +55,7 @@ A `.manifest.json` tracks every source that's been ingested — path, timestamps
 
 `/wiki-update` adds a code-understanding step before distillation when the current project contains source code. Git answers **what changed**; `code-understand` answers **what that change touches**; the agent decides **what is worth remembering**; the vault stores only the distilled result.
 
-With the default `CODE_UNDERSTANDING_BACKEND=auto`, CodeGraph is used when available and the built-in extractor + `rg` is used otherwise. CodeGraph is an optional local accelerator, not part of the vault: its `.codegraph/` index stays beside the project and is never copied into wiki pages.
+With the default `CODE_UNDERSTANDING_BACKEND=auto`, CodeGraph is used when available, then a Graphify graph (`graphify-out/graph.json`, read only) when one exists, and the built-in extractor + `rg` otherwise. CodeGraph is an optional local accelerator, not part of the vault: its `.codegraph/` index stays beside the project and is never copied into wiki pages.
 
 Use `obsidian-wiki doctor --project .` from the project root to verify CodeGraph availability and index freshness. With `auto`, a healthy CodeGraph backend is preferred; otherwise the built-in fallback is used.
 
@@ -205,8 +219,9 @@ The OKF round-trip is lossless. The `graph.json` round-trip is not — it carrie
 
 ```
 obsidian-wiki/
-├── .skills/                             # ← Canonical skill definitions (source of truth)
-│   └── <skill-name>/SKILL.md            #   39 skills — see docs/skills.md
+├── skills/                              # ← Canonical skill definitions (source of truth)
+│   └── <skill-name>/SKILL.md            #   see docs/skills.md
+├── .skills → skills                     # Compat link for installs made before the rename
 │
 ├── obsidian_wiki/                       # Python package — CLI, setup, sync, session brain
 ├── extensions/brain/                    # Zero-build Chrome extension: capture + form fill
@@ -223,12 +238,12 @@ obsidian-wiki/
 ├── .agent/workflows/obsidian-wiki.md    # Slash-command registry → Antigravity
 ├── .github/copilot-instructions.md      # Always-on → GitHub Copilot (VS Code Chat)
 │
-├── .claude/skills/   → symlinks to .skills/*   (created by setup)
-├── .cursor/skills/   → symlinks to .skills/*
-├── .windsurf/skills/ → symlinks to .skills/*
-├── .agents/skills/   → symlinks to .skills/*
-├── .pi/skills/       → symlinks to .skills/*
-├── .kiro/skills/     → symlinks to .skills/*
+├── .claude/skills/   → symlinks to skills/*   (created by setup)
+├── .cursor/skills/   → symlinks to skills/*
+├── .windsurf/skills/ → symlinks to skills/*
+├── .agents/skills/   → symlinks to skills/*
+├── .pi/skills/       → symlinks to skills/*
+├── .kiro/skills/     → symlinks to skills/*
 │
 ├── setup.sh                             # One-command agent setup
 ├── .env.example                         # Configuration template
@@ -237,4 +252,4 @@ obsidian-wiki/
 
 Global symlink targets created by setup are listed in [Installation](installation.md#what-setupsh-wires-up).
 
-For the full pattern — three-layer architecture, page templates, project organization — read [`.skills/llm-wiki/SKILL.md`](../.skills/llm-wiki/SKILL.md).
+For the full pattern — three-layer architecture, page templates, project organization — read [`skills/llm-wiki/SKILL.md`](../skills/llm-wiki/SKILL.md).

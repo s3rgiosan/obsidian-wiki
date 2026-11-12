@@ -8,6 +8,7 @@ against a throwaway HOME.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -30,19 +31,35 @@ def _commands(home: Path, event: str) -> list:
     return hk._registered_commands(_settings(home), event)
 
 
+#: What a plain `hooks install` registers: everything but the opt-in hooks.
+DEFAULT_HOOKS = [(event, name) for event, name in hk.HOOKS if event not in hk.OPT_IN]
+
+
 def test_both_hooks_are_bundled_and_executable() -> None:
     for _event, name in hk.HOOKS:
         script = hk.hook_script(name)
         assert script is not None, f"{name} not found in the package or checkout"
-        assert script.stat().st_mode & 0o111, f"{name} is not executable"
+        # Windows has no exec bit; the registered command runs `bash <script>`.
+        if os.name != "nt":
+            assert script.stat().st_mode & 0o111, f"{name} is not executable"
 
 
 def test_install_registers_both_hooks_on_a_fresh_home(home: Path) -> None:
     result = hk.install(home)
-    assert sorted(result["added"]) == sorted(name for _, name in hk.HOOKS)
+    assert sorted(result["added"]) == sorted(name for _, name in DEFAULT_HOOKS)
     assert result["missing"] == []
-    for event, name in hk.HOOKS:
+    for event, name in DEFAULT_HOOKS:
         assert any(name in command for command in _commands(home, event))
+    assert "UserPromptSubmit" not in _settings(home)["hooks"], "per-prompt recall is opt-in"
+
+
+def test_the_opt_in_recall_hook_installs_only_when_named(home: Path) -> None:
+    result = hk.install(home, only="UserPromptSubmit")
+    assert result["added"] == ["wiki-prompt-recall.sh"]
+    assert set(_settings(home)["hooks"]) == {"UserPromptSubmit"}
+    hk.install(home)
+    assert set(_settings(home)["hooks"]) == {"SessionStart", "UserPromptSubmit", "Stop"}
+    assert sorted(hk.uninstall(home)["removed"]) == sorted(name for _, name in hk.HOOKS)
 
 
 def test_install_is_idempotent(home: Path) -> None:
@@ -50,7 +67,7 @@ def test_install_is_idempotent(home: Path) -> None:
     before = _settings(home)
     result = hk.install(home)
     assert result["added"] == []
-    assert sorted(result["already"]) == sorted(name for _, name in hk.HOOKS)
+    assert sorted(result["already"]) == sorted(name for _, name in DEFAULT_HOOKS)
     assert _settings(home) == before
 
 
@@ -90,7 +107,7 @@ def test_uninstall_removes_only_ours(home: Path) -> None:
     path.write_text(json.dumps(data), encoding="utf-8")
 
     result = hk.uninstall(home)
-    assert sorted(result["removed"]) == sorted(name for _, name in hk.HOOKS)
+    assert sorted(result["removed"]) == sorted(name for _, name in DEFAULT_HOOKS)
     data = _settings(home)
     assert "SessionStart" not in data["hooks"]
     assert _commands(home, "Stop") == ["echo mine"]
@@ -117,11 +134,12 @@ def test_malformed_settings_are_refused_not_overwritten(home: Path) -> None:
 
 
 def test_status_reports_each_hook(home: Path) -> None:
-    assert [e.registered for e in hk.status(home)] == [False, False]
+    assert [e.registered for e in hk.status(home)] == [False, False, False]
     hk.install(home)
     entries = hk.status(home)
-    assert all(e.registered and e.bundled and e.executable for e in entries)
-    assert [e.event for e in entries] == ["SessionStart", "Stop"]
+    assert [e.event for e in entries] == ["SessionStart", "UserPromptSubmit", "Stop"]
+    assert all(e.bundled and e.executable for e in entries)
+    assert [e.registered for e in entries] == [True, False, True]
 
 
 def test_reachability_reports_a_path_the_hook_can_use() -> None:
@@ -147,8 +165,13 @@ def test_cli_status_exits_nonzero_until_installed(home: Path) -> None:
 
     after = subprocess.run([sys.executable, "-m", "obsidian_wiki.cli", "hooks", "status", "--json"],
                            capture_output=True, text=True, env=env)
+    if os.name == "nt" and not json.loads(after.stdout)["reachability"]["reachable"]:
+        # The hooks find the package via `obsidian-wiki` or `python3`; a source
+        # checkout on Windows has neither (python.org ships only python.exe).
+        pytest.skip("hooks cannot reach obsidian_wiki without python3 on Windows")
+    assert after.returncode == 0, "an unregistered opt-in hook must not fail status"
     data = json.loads(after.stdout)
-    assert all(entry["registered"] for entry in data["hooks"])
+    assert all(entry["registered"] for entry in data["hooks"] if entry["event"] not in hk.OPT_IN)
 
 
 def test_memory_and_hooks_commands_do_not_print_the_stale_install_nag(home: Path, tmp_path: Path) -> None:
@@ -176,7 +199,7 @@ def test_setup_registers_the_hooks_by_default(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert "Session hooks:" in proc.stdout
-    assert all(entry.registered for entry in hk.status(home))
+    assert all(entry.registered for entry in hk.status(home) if entry.event not in hk.OPT_IN)
 
 
 def test_setup_honours_no_hooks(tmp_path: Path) -> None:
@@ -204,7 +227,7 @@ def test_the_registered_command_pins_the_installing_interpreter(home: Path) -> N
     hk.install(home)
     command = _commands(home, "SessionStart")[0]
     assert command.startswith('PATH="')
-    assert str(Path(sys.executable).parent) in command
+    assert hk._git_bash_path(Path(sys.executable).parent) in command
 
 
 def test_the_pinned_path_is_not_symlink_resolved() -> None:
@@ -213,7 +236,7 @@ def test_the_pinned_path_is_not_symlink_resolved() -> None:
     bin_dir = hk._bin_dir()
     assert bin_dir == Path(sys.executable).parent
     command = hk._command_for(Path("/x/hook.sh"))
-    assert f'PATH="{Path(sys.executable).parent}:$PATH"' in command
+    assert f'PATH="{hk._git_bash_path(Path(sys.executable).parent)}:$PATH"' in command
 
 
 def test_reachability_searches_the_path_the_hook_will_get(home: Path) -> None:
@@ -223,3 +246,49 @@ def test_reachability_searches_the_path_the_hook_will_get(home: Path) -> None:
     if reach["console_script"]:
         assert str(Path(sys.executable).parent) in reach["console_script"] or reach["reachable"]
     assert isinstance(reach["reachable"], bool)
+
+
+def test_windows_paths_are_written_in_git_bash_form(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Claude Code runs hooks in Git Bash, where `C:\\Users\\...` collapses to
+    `C:Users...` — the backslashes are escapes — and the hook exits 127 (#265)."""
+    # Build the paths *before* patching os.name. Python 3.9's pathlib picks the
+    # flavour when a Path is instantiated, so `Path("C:/...")` while os.name is
+    # "nt" tries to build a WindowsPath on posix and raises NotImplementedError.
+    # 3.12 dropped that check, which is why this only broke the 3.9 CI leg. And
+    # because `hk.os` is the global os module, the patch is process-wide: the
+    # raise lands inside pytest's own failure reporting (`Path(os.getcwd())`),
+    # surfacing as an INTERNALERROR that masks whatever actually failed.
+    script = Path("C:/Users/Callum/h.sh")
+    bin_dir = Path("C:/py/Scripts")
+    monkeypatch.setattr(hk.os, "name", "nt")
+    assert hk._git_bash_path(script) == "/c/Users/Callum/h.sh"
+    monkeypatch.setattr(hk, "_bin_dir", lambda: bin_dir)
+    command = hk._command_for(script)
+    assert "\\" not in command
+    assert command == 'PATH="/c/py/Scripts:$PATH" bash "/c/Users/Callum/h.sh"'
+
+
+def test_the_script_path_is_quoted(home: Path) -> None:
+    """Home directories have spaces in them."""
+    hk.install(home)
+    for event, name in DEFAULT_HOOKS:
+        command = next(c for c in _commands(home, event) if name in c)
+        assert f'"{hk._git_bash_path(hk.hook_script(name))}"' in command
+
+
+def test_install_rewrites_a_backslash_registration(home: Path) -> None:
+    """Pre-fix Windows installs look registered but can never run, so install
+    must replace them instead of skipping them."""
+    path = hk.settings_path(home)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"hooks": {"SessionStart": [
+        {"matcher": "", "hooks": [
+            {"type": "command", "command": "bash C:\\Users\\Callum\\wiki-session-recap.sh"},
+            {"type": "command", "command": "echo mine"},
+        ]}
+    ]}}), encoding="utf-8")
+    hk.install(home)
+    commands = _commands(home, "SessionStart")
+    assert "echo mine" in commands
+    recap = [c for c in commands if "wiki-session-recap" in c]
+    assert len(recap) == 1 and "\\" not in recap[0]

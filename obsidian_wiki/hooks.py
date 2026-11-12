@@ -1,8 +1,10 @@
 """Install, remove, and inspect the Claude Code session hooks.
 
 Two hooks bracket a session: ``wiki-session-recap.sh`` at SessionStart injects
-the vault's memory, ``wiki-stop-capture.sh`` at Stop nudges a capture. They
-only take effect once registered in ``~/.claude/settings.json``.
+the vault's memory, ``wiki-stop-capture.sh`` at Stop nudges a capture. An
+opt-in third, ``wiki-prompt-recall.sh`` at UserPromptSubmit, adds the few notes
+relevant to each prompt. They only take effect once registered in
+``~/.claude/settings.json``.
 
 Until now that registration was a prose procedure in ``wiki-setup`` — locate
 the script, hand-merge JSON, don't clobber other hooks — and only the Stop hook
@@ -25,8 +27,12 @@ from typing import Optional
 #: (event, script name) — the order they run in a session.
 HOOKS = (
     ("SessionStart", "wiki-session-recap.sh"),
+    ("UserPromptSubmit", "wiki-prompt-recall.sh"),
     ("Stop", "wiki-stop-capture.sh"),
 )
+#: Installed only when asked for by name (``--only``). Per-prompt recall adds
+#: context to every turn, so it is the user's call, not a default.
+OPT_IN = frozenset({"UserPromptSubmit"})
 
 
 def _pkg_dir() -> Path:
@@ -86,6 +92,23 @@ def _bin_dir() -> Optional[Path]:
     return candidate if candidate.is_dir() else None
 
 
+def _git_bash_path(path: Path) -> str:
+    """A path Git Bash can use, since that is the shell Claude Code runs hooks in.
+
+    On Windows ``str(path)`` is ``C:\\Users\\...``; inside the double-quoted
+    command string the backslashes are escapes, so the path collapses to
+    ``C:Users...`` and the hook exits 127 silently. Git Bash wants the MSYS
+    form, ``/c/Users/...``. Elsewhere a path is already POSIX.
+    """
+    if os.name != "nt":
+        return str(path)
+    text = path.as_posix()
+    drive, colon, rest = text.partition(":")
+    if colon and len(drive) == 1 and drive.isalpha():
+        return f"/{drive.lower()}{rest}"
+    return text
+
+
 def _command_for(script: Path) -> str:
     """The shell command to register.
 
@@ -100,8 +123,8 @@ def _command_for(script: Path) -> str:
     the right install without needing to know about venvs.
     """
     bin_dir = _bin_dir()
-    prefix = f'PATH="{bin_dir}:$PATH" ' if bin_dir else ""
-    return f"{prefix}bash {script}"
+    prefix = f'PATH="{_git_bash_path(bin_dir)}:$PATH" ' if bin_dir else ""
+    return f'{prefix}bash "{_git_bash_path(script)}"'
 
 
 def _registered_commands(data: dict, event: str) -> list:
@@ -147,6 +170,33 @@ def status(home: Optional[Path] = None) -> list:
     return out
 
 
+def _drop_backslash_entries(hooks: dict, event: str, name: str) -> bool:
+    """Remove our own entries written with backslash paths, so install rewrites them.
+
+    Anyone who ran setup on Windows before the fix has a registration Git Bash
+    cannot run. It looks registered, so install would skip it and leave the
+    hook dead forever. Returns True when something was dropped.
+    """
+    dropped = False
+    kept = []
+    for group in hooks.get(event, []) or []:
+        entries = []
+        for entry in (group or {}).get("hooks", []) or []:
+            command = str(entry.get("command", "")) if isinstance(entry, dict) else ""
+            if name in command and "\\" in command:
+                dropped = True
+                continue
+            entries.append(entry)
+        if entries:
+            kept.append({**group, "hooks": entries})
+    if dropped:
+        if kept:
+            hooks[event] = kept
+        else:
+            hooks.pop(event, None)
+    return dropped
+
+
 def install(home: Optional[Path] = None, *, only: Optional[str] = None) -> dict:
     """Register the hooks, appending to whatever is already there.
 
@@ -159,13 +209,14 @@ def install(home: Optional[Path] = None, *, only: Optional[str] = None) -> dict:
     added, skipped, missing = [], [], []
 
     for event, name in HOOKS:
-        if only and event != only:
+        if (only and event != only) or (not only and event in OPT_IN):
             continue
         script = hook_script(name)
         if script is None:
             missing.append(name)
             continue
-        if is_registered(data, event, name):
+        repaired = _drop_backslash_entries(hooks, event, name)
+        if not repaired and is_registered(data, event, name):
             skipped.append(name)
             continue
         groups = hooks.setdefault(event, [])
@@ -219,7 +270,7 @@ def reachability() -> dict:
     # Look where the registered command will look: the installing
     # interpreter's bin directory first, then the ambient PATH.
     bin_dir = _bin_dir()
-    search = f"{bin_dir}:{os.environ.get('PATH', '')}" if bin_dir else os.environ.get("PATH", "")
+    search = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}" if bin_dir else os.environ.get("PATH", "")
     on_path = shutil.which("obsidian-wiki", path=search)
     python3 = shutil.which("python3", path=search)
     importable = False

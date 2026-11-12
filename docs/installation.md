@@ -28,11 +28,11 @@ uv tool install obsidian-wiki     # or: uv pip install obsidian-wiki
 pipx install obsidian-wiki
 ```
 
-Upgrades are `uv tool upgrade obsidian-wiki` / `pipx upgrade obsidian-wiki`; re-run `obsidian-wiki setup` afterwards to pick up new skills.
+Upgrades are `uv tool upgrade obsidian-wiki` / `pipx upgrade obsidian-wiki`. The next `obsidian-wiki` command refreshes the skills in every agent that setup already installed into, so new skills appear without re-running setup. The CLI and the SessionStart hook print a one-line notice when a newer release is on PyPI (checked at most once a day; set `OBSIDIAN_WIKI_NO_UPDATE_CHECK=1` to turn it off).
 
 > **Don't use `uvx obsidian-wiki setup`.** `uvx` runs from a throwaway environment, and setup symlinks skills *into the installed package*. When the environment is discarded, every skill link in `~/.claude/skills/`, `~/.codex/skills/`, and the rest points at a path that no longer exists. If you must run it that way, use `uvx obsidian-wiki setup --copy`, which copies the skill files instead.
 
-`obsidian-wiki setup` writes the config to `~/.config/obsidian-wiki/config` and installs every wiki skill into all your AI agents (Claude Code, Cursor, Codex, Gemini, Hermes, Pi, and more). Skills are symlinked to the installed package, so `pip install -U obsidian-wiki` upgrades them everywhere — just re-run `obsidian-wiki setup` to pick up new skills.
+`obsidian-wiki setup` writes the config to `~/.config/obsidian-wiki/config` and installs every wiki skill into all your AI agents (Claude Code, Cursor, Codex, Gemini, Hermes, Pi, and more). Skills are symlinked to the installed package, so `pip install -U obsidian-wiki` upgrades them everywhere, and the next `obsidian-wiki` command links in any new skills.
 
 Then open a project in your agent and say **"set up my wiki"**.
 
@@ -47,6 +47,86 @@ obsidian-wiki setup --copy        # copy skill files instead of symlinking
 
 Run `obsidian-wiki info` to see the resolved paths and `obsidian-wiki doctor` to health-check the result. See the [CLI reference](cli.md) for everything else the package ships.
 
+## Hermes: profile-scoped installation and native updates
+
+Install the Python CLI using pip, uv tool, or pipx as above, but **do not run the
+broad setup command** when you only want one Hermes profile. The CLI is still
+needed: skill bundles do not contain repository-level scripts and assets.
+
+```bash
+# Existing profile directory; HERMES_HOME also works instead of this flag.
+obsidian-wiki install-hermes --hermes-home /absolute/path/to/profile --dry-run
+obsidian-wiki install-hermes --hermes-home /absolute/path/to/profile
+
+# Initialize vault + shared wiki configuration without installing other agents.
+obsidian-wiki setup --vault-only --vault /absolute/path/to/brain
+```
+
+On Windows, quote native absolute paths, for example
+`--hermes-home "C:/Users/you/AppData/Local/hermes/profiles/research"`.
+`install-hermes` requires an existing absolute profile home; it never guesses a
+Windows installation root or scans sibling profiles. It invokes
+`hermes skills install https://raw.githubusercontent.com/<owner>/<repo>/HEAD/skills/<name>/SKILL.md --name <name>`
+for each bundled skill, retaining native security scans, confirmation, provenance
+and update handling. Direct URLs avoid a Hermes resolver collision where a
+fully qualified GitHub identifier can select an unrelated same-named official
+skill. Hermes re-fetches these URLs for native check/update operations. Referenced
+support files follow the native URL adapter; repository-level assets and other
+shared references remain available via the Python package's configured
+`OBSIDIAN_WIKI_REPO`. Add `--yes` to skip confirmations without bypassing scans.
+Use repeatable `--skill wiki-query --skill llm-wiki` to select a subset, or
+`--source owner/repo` to track a fork's default branch. Local unpushed skill
+changes are **not** installed through this path. No dependencies are auto-installed.
+
+A skill that Hermes blocks, cannot fetch, or that you decline does not stop the
+batch: the rest are still attempted, and the command ends with a summary and a
+`--skill ...` line to retry the failures (exit code 1 if any failed). Existing
+destination names are refused before any installation starts, including copied
+or symlinked skills.
+
+Not every skill installs cleanly through Hermes today. Its scanner blocks some
+community-source skills (for example a `CAUTION`/`DANGEROUS` verdict on skills
+that edit agent config), and its URL adapter refuses a skill whose SKILL.md
+mentions a `references/`, `scripts/` or `assets/` path that doesn't exist next
+to it. Read the Hermes verdict before deciding whether `--force` is warranted
+for a specific skill; `install-hermes` never passes it.
+
+For a manual-copy migration, back up your edits and remove only the intended
+old copies before installing. Never use `--force`
+just to make a collision disappear.
+
+Use Hermes with the **same profile** for maintenance:
+
+```bash
+hermes -p research skills check
+hermes -p research skills update
+hermes -p research skills update wiki-query
+```
+
+Alternatively set `HERMES_HOME` to that same absolute directory. Hermes skips
+locally modified hub skills by default; review changes before considering its
+`--force` option. Do not rerun broad `obsidian-wiki setup` to update hub skills.
+The Python CLI/assets have a separate lifecycle: upgrade using your Python
+installer. Skills track the selected repository's default branch, not a pinned
+Python release, so use compatible versions of both.
+
+`--vault-only` writes the existing **user-wide** wiki config and writing profile,
+not a Hermes-private vault configuration. Review your current vault selection
+before changing it. It skips agent skills, Claude hooks and sync configuration;
+`--project`, `--project-only` and `--remote` cannot be combined with it. No Hermes
+lifecycle hooks or automatic memory integration are installed.
+
+### Developing from a checkout
+
+For unpushed edits, add the checkout's absolute `skills` directory to this
+profile's Hermes `skills.external_dirs` using Hermes configuration tooling.
+This is Git-managed discovery, **not** Skills Hub update tracking. Writable
+external skills can be edited in place by Hermes. Local copies take precedence
+and must not shadow the external skills. Keep the Python CLI/assets installed
+and initialize the vault with `setup --vault-only` as above.
+
+See [Hermes skill sources and update lifecycle](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills).
+
 ## Let your agent set it up
 
 The fastest path — no commands required. Give your agent this repo and say:
@@ -55,7 +135,7 @@ The fastest path — no commands required. Give your agent this repo and say:
 https://github.com/Ar9av/obsidian-wiki — set up my wiki
 ```
 
-The agent reads [`.skills/wiki-setup/SKILL.md`](../.skills/wiki-setup/SKILL.md) from the repo, asks where you want your vault to live, and initializes the full structure: directories, index, log, Obsidian config, and an optional auto-capture hook. The skill *is* the setup guide.
+The agent reads [`skills/wiki-setup/SKILL.md`](../skills/wiki-setup/SKILL.md) from the repo, asks where you want your vault to live, and initializes the full structure: directories, index, log, Obsidian config, and an optional auto-capture hook. The skill *is* the setup guide.
 
 This works in any agent that can read files (Claude Code, Cursor, Windsurf, Codex, Gemini CLI, Kiro, and more). After setup, every wiki skill is available immediately.
 
@@ -91,6 +171,7 @@ For local-only config, copy `.env.example` to `.env` and set `OBSIDIAN_VAULT_PAT
 4. **Project-local symlinks** — `.claude/skills/`, `.cursor/skills/`, `.windsurf/skills/`, `.agents/skills/`, `.pi/skills/`, `.kiro/skills/`
 5. **Always-on rule files** — `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.hermes.md`, `.cursor/rules/…`, `.windsurf/rules/…`, `.kiro/steering/…`, `.agent/rules/…`, `.agent/workflows/…`, `.github/copilot-instructions.md`
 6. **GitHub sync** (optional) — see [Configuration → Syncing your vault to GitHub](configuration.md#syncing-your-vault-to-github)
+7. **Timezone** (optional) — `--timezone America/Detroit`, or answer the one-time prompt for a new vault; every stamp the wiki writes then carries that zone. See [Memory Surface → Timestamps](memory.md#timestamps-and-the-vaults-timezone)
 
 `obsidian-wiki setup` and `setup.sh` share one implementation, so pip and source installs produce the identical result.
 
@@ -116,8 +197,18 @@ What's different:
 
 - **Skills are namespaced.** Slash commands become `/obsidian-wiki:wiki-ingest`, `/obsidian-wiki:wiki-query`, and so on. Plain-language requests ("ingest this folder") route the same way they always do.
 - **Skills only.** The plugin doesn't register the session hooks or put the `obsidian-wiki` CLI on your `PATH`. For those, install with pip as well and run `obsidian-wiki setup`.
-- **Updates follow the repo.** The plugin has no pinned version, so it tracks the latest commit on `main`: run `claude plugin marketplace update obsidian-wiki`, then `claude plugin update obsidian-wiki@obsidian-wiki`, and restart Claude Code.
-- **Claude Code only.** Other agents need one of the paths above.
+- **Updates arrive with each release.** The plugin's `version` is bumped with every tagged release, so Claude Code offers an update only when one ships. To get releases without doing anything, turn on auto-update for this marketplace: run `/plugin`, open **Marketplaces**, select `obsidian-wiki`, and choose **Enable auto-update** (it is off by default for third-party marketplaces). Claude Code then updates the plugin at startup. To update by hand: `claude plugin marketplace update obsidian-wiki`, then `claude plugin update obsidian-wiki@obsidian-wiki`, and restart Claude Code.
+## Install as a plugin in other agents
+
+The same manifest works as a plugin for agents that read Claude Code marketplaces. Each gets all the skills from `skills/`:
+
+| Agent | Install |
+|---|---|
+| Codex | `codex plugin marketplace add Ar9av/obsidian-wiki`, then `codex plugin add obsidian-wiki@obsidian-wiki` |
+| Qwen Code | `qwen extensions install https://github.com/Ar9av/obsidian-wiki:obsidian-wiki` |
+| Cursor | Add `https://github.com/Ar9av/obsidian-wiki` as a plugin marketplace, then install `obsidian-wiki` |
+
+The same caveats apply: skills only, no hooks or CLI. Agents not listed here need one of the paths above.
 
 ## Install via Skills CLI (deprecated)
 

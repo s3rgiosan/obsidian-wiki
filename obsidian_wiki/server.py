@@ -16,22 +16,23 @@ import json
 import os
 import re
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, Field
 
+from obsidian_wiki import clock
 from obsidian_wiki.cache import _iter_entries
 from obsidian_wiki.context_pack import ContextError, build_context_pack
 from obsidian_wiki.graphrag import query as graph_query
 from obsidian_wiki.staging import StagingError, list_staged, resolve_in_vault
 from obsidian_wiki.lint import lint_vault
 from obsidian_wiki.sync import _git
-from obsidian_wiki.vault import iter_md
+from obsidian_wiki.vault import iter_md, iter_md_under, okignore_patterns, okignored
 
 VAULT = Path(os.environ.get("OBSIDIAN_VAULT_PATH", "/vault")).expanduser()
 API_KEY = os.environ.get("WIKI_API_KEY", "")
@@ -102,7 +103,7 @@ def write_page(
     target = _resolve(rel)
     if target.exists() and not upsert:
         raise HTTPException(409, f"page already exists: {rel}")
-    today = date.today().isoformat()
+    today = clock.today(clock.wiki_timezone(VAULT))
     created = today
     if target.exists():
         # Preserve the original created: date across updates.
@@ -152,12 +153,13 @@ def context_pack(
 
 # --- HTTP -------------------------------------------------------------------
 
-def require_key(request: Request) -> None:
-    if ANONYMOUS:
-        return
-    header = request.headers.get("authorization", "")
+def _key_ok(header: str) -> bool:
     token = header[7:] if header.lower().startswith("bearer ") else ""
-    if not hmac.compare_digest(token, API_KEY):
+    return ANONYMOUS or hmac.compare_digest(token, API_KEY)
+
+
+def require_key(request: Request) -> None:
+    if not _key_ok(request.headers.get("authorization", "")):
         raise HTTPException(401, "missing or invalid API key")
 
 
@@ -185,6 +187,7 @@ class ProfileWrite(BaseModel):
     value: str = ""
     confidence: float = 0.6
     source: str = "agent"
+    until: str = ""
     user_id: str = ""
 
 
@@ -227,8 +230,12 @@ def memory_recap(project: str = "", max_words: int = 350, min_confidence: float 
 
 def memory_profile(action: str = "list", key: str = "", value: str = "",
                    confidence: float = 0.6, source: str = "agent",
-                   user_id: str = "") -> dict[str, Any]:
-    """Read or update durable facts about a person. `user_id` scopes them."""
+                   until: str = "", user_id: str = "") -> dict[str, Any]:
+    """Read or update facts about a person. `user_id` scopes them.
+
+    Pass `until` (YYYY-MM-DD) for a time-bound fact ("travelling until Friday")
+    so it stops being injected once it is over.
+    """
     from obsidian_wiki import memory as mem
 
     scope = _scope(user_id)
@@ -238,7 +245,7 @@ def memory_profile(action: str = "list", key: str = "", value: str = "",
         if not key or not value:
             raise HTTPException(400, "key and value are required for action='set'")
         return {"fact": mem.set_fact(
-            VAULT, key, value, confidence=confidence, source=source, scope=scope
+            VAULT, key, value, confidence=confidence, source=source, until=until, scope=scope
         ).__dict__}
     if action == "forget":
         return {"removed": mem.forget_fact(VAULT, key, scope=scope)}
@@ -302,7 +309,24 @@ mcp.tool(name="memory_sync", description="Reconcile index.md and hot.md after wr
 
 # Must be built before `mcp.session_manager` exists. Mounted at /mcp below, so
 # its own path is "/". Stateless: no server-side session state to lose on restart.
-_mcp_app = mcp.streamable_http_app(streamable_http_path="/", stateless_http=True)
+# `host` must match the bind address: left at its loopback default, mcp turns on
+# DNS-rebinding protection and answers every LAN or container request with 421.
+_mcp_app = mcp.streamable_http_app(
+    streamable_http_path="/", stateless_http=True,
+    host=os.environ.get("WIKI_HOST", "127.0.0.1"),
+)
+
+
+def _keyed(inner):
+    """Route dependencies do not reach a mounted app, so /mcp checks the key itself."""
+    async def app(scope, receive, send):
+        if scope["type"] == "http":
+            header = dict(scope["headers"]).get(b"authorization", b"").decode("latin-1")
+            if not _key_ok(header):
+                await JSONResponse({"detail": "missing or invalid API key"}, 401)(scope, receive, send)
+                return
+        await inner(scope, receive, send)
+    return app
 
 
 @asynccontextmanager
@@ -314,7 +338,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="obsidian-wiki memory", lifespan=lifespan)
-app.mount("/mcp", _mcp_app)
+app.mount("/mcp", _keyed(_mcp_app))
 
 
 @app.get("/health")
@@ -362,17 +386,49 @@ _MANIFEST_PAGE_KEYS = ("pages_produced", "pages_created", "pages_in_vault")
 
 
 def _count_md(rel: str) -> int:
-    directory = VAULT / rel
-    return len(list(directory.rglob("*.md"))) if directory.is_dir() else 0
+    return len(iter_md_under(VAULT, VAULT / rel))
+
+
+def _dirty_lines(porcelain_z: str) -> list[str]:
+    """Porcelain status lines, minus any path excluded by `.okignore`.
+
+    Takes `-z` output because plain porcelain C-quotes a path holding a space or
+    non-ASCII character, which no pattern would match.
+    """
+    patterns = okignore_patterns(VAULT)
+
+    def hidden(path: str) -> bool:
+        return okignored(Path(path), patterns)
+
+    def shown(path: str) -> str:
+        return "(ignored)" if hidden(path) else path
+
+    lines = []
+    fields = iter(porcelain_z.split("\0"))
+    for field in fields:
+        if not field:
+            continue
+        code, path = field[:2], field[3:]
+        # -z puts a rename's or copy's source in the next field, with no arrow.
+        source = next(fields) if "R" in code or "C" in code else None
+        if source is None:
+            if not hidden(path):
+                lines.append(field)
+        elif not (hidden(source) and hidden(path)):
+            # Half public is still a real change, so report it without the hidden side.
+            lines.append(f"{code} {shown(source)} -> {shown(path)}")
+    return lines
 
 
 def _git_status() -> dict[str, Any]:
     if not (VAULT / ".git").is_dir():
         return {"repo": False}
-    porcelain = _git(VAULT, "status", "--porcelain")
+    # Every untracked file, not git's collapsed `?? dir/`: that names a directory
+    # the filter can't see into, even when all it holds is ignored.
+    porcelain = _git(VAULT, "status", "--porcelain", "-z", "--untracked-files=all")
     branch = _git(VAULT, "rev-parse", "--abbrev-ref", "HEAD")
     log = _git(VAULT, "log", "-5", "--pretty=%h %s")
-    dirty = [line for line in porcelain.stdout.splitlines() if line.strip()]
+    dirty = _dirty_lines(porcelain.stdout)
     return {
         "repo": True,
         "branch": branch.stdout.strip(),
@@ -433,7 +489,7 @@ def status() -> dict[str, Any]:
         "sources": sources,
         "recent_pages": [
             {
-                "path": str(p.relative_to(VAULT)),
+                "path": p.relative_to(VAULT).as_posix(),
                 "modified": datetime.fromtimestamp(p.stat().st_mtime, timezone.utc).isoformat(),
             }
             for p in recent
@@ -494,7 +550,7 @@ def http_profile_list(user_id: str = "") -> dict[str, Any]:
 def http_profile_set(body: ProfileWrite) -> dict[str, Any]:
     return memory_profile(
         body.action, key=body.key, value=body.value,
-        confidence=body.confidence, source=body.source, user_id=body.user_id,
+        confidence=body.confidence, source=body.source, until=body.until, user_id=body.user_id,
     )
 
 

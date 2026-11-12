@@ -11,6 +11,7 @@ from any project.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -67,7 +68,7 @@ def _pkg_dir() -> Path:
 
 def skills_dir() -> Path:
     """Return the directory holding the bundled skill folders."""
-    for cand in (_pkg_dir() / "_data" / "skills", _pkg_dir().parent / ".skills"):
+    for cand in (_pkg_dir() / "_data" / "skills", _pkg_dir().parent / "skills"):
         if cand.is_dir():
             return cand
     raise FileNotFoundError(
@@ -409,7 +410,7 @@ def resolve_vault_path(cli_vault: str | None) -> str:
     return existing
 
 
-def write_config(vault_path: str) -> None:
+def write_config(vault_path: str, *, quiet: bool = False) -> None:
     """Write the setup-managed keys, preserving everything else in the file.
 
     Only ``OBSIDIAN_VAULT_PATH``, ``OBSIDIAN_WIKI_REPO``, ``CLAUDE_HISTORY_PATH``
@@ -452,7 +453,8 @@ def write_config(vault_path: str) -> None:
             out.append(f'{key}="{value}"')
 
     GLOBAL_CONFIG.write_text("\n".join(out) + "\n", encoding="utf-8")
-    print(f"✅  Global config written to {GLOBAL_CONFIG}")
+    if not quiet:
+        print(f"✅  Global config written to {GLOBAL_CONFIG}")
 
 
 def ensure_global_writing_profile() -> Path:
@@ -480,23 +482,72 @@ VAULT_SUBDIRS = (
 )
 
 
-def scaffold_vault(vault_path: Path) -> bool:
+#: One color per category, shared by the graph view and the file explorer so a
+#: new vault looks organised the first time it is opened in Obsidian.
+CATEGORY_COLORS = {
+    "concepts": "#4f8ef7",
+    "entities": "#f2a541",
+    "skills": "#3cc48a",
+    "references": "#9b8cf2",
+    "synthesis": "#ef5d7a",
+    "journal": "#7fb8c9",
+    "projects": "#c9a227",
+}
+FOLDER_COLORS_SNIPPET = "obsidian-wiki-folders"
+
+
+def _folder_colors_css() -> str:
+    rules = "\n".join(
+        f'.nav-folder-title[data-path^="{name}"] {{ color: {color}; }}'
+        for name, color in CATEGORY_COLORS.items()
+    )
+    return (
+        "/* Written by obsidian-wiki setup: one color per wiki category, matching the graph view. */\n"
+        f"{rules}\n"
+        ".nav-folder-title[data-path^=\"_\"] { opacity: 0.55; }\n"
+    )
+
+
+def _graph_settings() -> dict:
+    return {
+        # Bookkeeping and staging folders are not knowledge; keep them out of the graph.
+        "search": "-path:_raw -path:_archives -path:_staging -path:_meta -path:_readouts "
+                  "-file:index -file:log -file:hot",
+        "showTags": False,
+        "showOrphans": True,
+        "showArrow": True,
+        "hideUnresolved": True,
+        "colorGroups": [
+            {"query": f"path:{name}", "color": {"a": 1, "rgb": int(color[1:], 16)}}
+            for name, color in CATEGORY_COLORS.items()
+        ],
+    }
+
+
+def scaffold_vault(vault_path: Path, *, timezone_name: str = "") -> bool:
     """Create the vault directory structure and special files if they don't exist yet.
 
     Idempotent: existing files/dirs are left untouched. Returns True if the vault
     directory itself had to be created (i.e. this is a brand new vault).
+    *timezone_name* (an IANA zone) goes into a new ``index.md``'s frontmatter as
+    ``timezone:``; an existing ``index.md`` is not edited here.
     """
+    from obsidian_wiki import clock
+
     created = not vault_path.is_dir()
     for name in VAULT_SUBDIRS:
         (vault_path / name).mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    tz = clock.parse_timezone(timezone_name)
+    timestamp = clock.stamp(tz)
+    timezone_line = f"timezone: {timezone_name.strip()}\n" if timezone_name.strip() else ""
 
     index_md = vault_path / "index.md"
     if not index_md.exists():
         index_md.write_text(
             "---\n"
             "title: Wiki Index\n"
+            f"{timezone_line}"
             "generated_by: obsidian-wiki memory index\n"
             "---\n\n"
             "# Wiki Index\n\n"
@@ -586,10 +637,62 @@ def scaffold_vault(vault_path: Path) -> bool:
     appearance_json = vault_path / ".obsidian" / "appearance.json"
     if not appearance_json.exists():
         appearance_json.write_text(
-            json.dumps({"baseFontSize": 16}, indent=2) + "\n", encoding="utf-8"
+            json.dumps(
+                {"baseFontSize": 16, "enabledCssSnippets": [FOLDER_COLORS_SNIPPET]}, indent=2
+            )
+            + "\n",
+            encoding="utf-8",
         )
 
+    snippet = vault_path / ".obsidian" / "snippets" / f"{FOLDER_COLORS_SNIPPET}.css"
+    if not snippet.exists():
+        snippet.parent.mkdir(parents=True, exist_ok=True)
+        snippet.write_text(_folder_colors_css(), encoding="utf-8")
+
+    graph_json = vault_path / ".obsidian" / "graph.json"
+    if not graph_json.exists():
+        graph_json.write_text(json.dumps(_graph_settings(), indent=2) + "\n", encoding="utf-8")
+
     return created
+
+
+UPDATE_CHECK_CACHE = GLOBAL_CONFIG_DIR / "update-check.json"
+
+
+def _update_notice() -> str:
+    from obsidian_wiki import update_check
+
+    return update_check.notice(__version__, UPDATE_CHECK_CACHE)
+
+
+def cmd_update_check(args: argparse.Namespace) -> int:
+    line = _update_notice()
+    if line:
+        print(line)
+    return 0
+
+
+def _refresh_installed_skills() -> int:
+    """Re-install skills into every agent dir that setup already populated.
+
+    Only directories that already hold at least one of our managed skills are
+    touched, in the mode (symlink or copy) they were installed with, so an
+    upgrade picks up new skills without spreading into agents the user never
+    set up. Returns the number of agent dirs refreshed.
+    """
+    bundled = set(list_skills())
+    refreshed = 0
+    for rel, label, subset in GLOBAL_AGENT_DIRS:
+        target = HOME / rel
+        if not target.is_dir():
+            continue
+        ours = [p for p in target.iterdir() if p.name in bundled and (p / "SKILL.md").exists()]
+        if not ours:
+            continue
+        mode = "symlink" if any(_is_link_or_junction(p) for p in ours) else "copy"
+        install_skills(target, label, subset=subset, mode=mode, quiet=True)
+        refreshed += 1
+    return refreshed
 
 
 def _check_stale() -> None:
@@ -604,11 +707,25 @@ def _check_stale() -> None:
 
     setup_version = _read_config_value("OBSIDIAN_WIKI_VERSION")
     if setup_version and setup_version != __version__:
-        print(
-            f"⚠️  obsidian-wiki upgraded {setup_version} → {__version__} but setup hasn't been re-run.\n"
-            f"   New skills won't be available until you run: obsidian-wiki setup",
-            file=sys.stderr,
-        )
+        try:
+            # Everything here goes to stderr: the command that triggered the
+            # check may be printing JSON on stdout.
+            with contextlib.redirect_stdout(sys.stderr):
+                refreshed = _refresh_installed_skills()
+                write_config(_read_config_value("OBSIDIAN_VAULT_PATH"), quiet=True)
+        except Exception as exc:  # never fail the user's command over this
+            print(
+                f"⚠️  obsidian-wiki upgraded {setup_version} → {__version__} but the skills "
+                f"could not be refreshed ({exc}).\n   Run: obsidian-wiki setup",
+                file=sys.stderr,
+            )
+            return
+        if refreshed:
+            print(
+                f"✅  obsidian-wiki upgraded {setup_version} → {__version__}: "
+                f"refreshed skills in {refreshed} agent dir(s).",
+                file=sys.stderr,
+            )
         return
 
     # Even if the version matches, check that this instance's Claude skills dir
@@ -663,7 +780,7 @@ def _required_vault_paths(vault: Path) -> list[Path]:
 
 def _doctor_project_check(project_dir: Path) -> dict[str, str]:
     required = [project_dir / "AGENTS.md", *[project_dir / dest for _src, dest in BOOTSTRAP_FILES[1:]]]
-    missing = [str(path.relative_to(project_dir)) for path in required if not path.exists()]
+    missing = [path.relative_to(project_dir).as_posix() for path in required if not path.exists()]
     if missing:
         return {
             "status": "warn",
@@ -878,7 +995,7 @@ def run_doctor(*, vault_override: str | None = None, project_dir: str | None = N
     if vault is not None:
         if vault.is_dir():
             _doctor_add(checks, name="vault-path", status="pass", detail="vault directory exists", hint="")
-            missing_core = [str(path.relative_to(vault)) for path in _required_vault_paths(vault) if not path.exists()]
+            missing_core = [path.relative_to(vault).as_posix() for path in _required_vault_paths(vault) if not path.exists()]
             if missing_core:
                 _doctor_add(
                     checks,
@@ -951,7 +1068,9 @@ def run_doctor(*, vault_override: str | None = None, project_dir: str | None = N
 
                 entries = _hk.status()
                 reach = _hk.reachability()
-                unregistered = [e.script for e in entries if not e.registered]
+                unregistered = [
+                    e.script for e in entries if not e.registered and e.event not in _hk.OPT_IN
+                ]
                 if unregistered:
                     # The hooks are optional, so an install that never asked
                     # for them is not misconfigured — but it also has no
@@ -1144,8 +1263,44 @@ def _maybe_configure_sync(vault_path: Path, remote_arg: str | None) -> bool:
     return True
 
 
+def _maybe_set_timezone(vault_dir: Path, timezone_arg: str | None, vault_created: bool) -> str:
+    """Record the wiki's timezone in index.md: from --timezone, else by asking
+    once for a brand-new vault on a terminal. Returns the zone in effect."""
+    from obsidian_wiki import clock
+
+    name = (timezone_arg or "").strip()
+    if not name and vault_created and sys.stdin.isatty():
+        print()
+        try:
+            name = input("  Timezone for the wiki's timestamps (IANA name like America/Detroit; Enter for UTC): ").strip()
+        except EOFError:
+            name = ""
+    if name:
+        clock.set_timezone(vault_dir, name)
+        print(f"✅  Timezone: {name} (timezone: in index.md; `obsidian-wiki memory now` prints stamps in it)")
+        return name
+    current = clock.timezone_name(vault_dir)
+    if current:
+        print(f"✅  Timezone: {current} (index.md)")
+    else:
+        print("    Timezone: UTC — add `timezone: <IANA name>` to index.md's frontmatter, or re-run with --timezone")
+    return current
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
+    vault_only = getattr(args, "vault_only", False)
+    if vault_only and (args.project is not None or args.project_only or args.remote):
+        print("error: --vault-only cannot be combined with --project, --project-only or --remote", file=sys.stderr)
+        return 1
     mode = "copy" if args.copy else "symlink"
+    if getattr(args, "timezone", None):
+        from obsidian_wiki import clock
+
+        try:
+            clock.parse_timezone(args.timezone)
+        except clock.TimezoneError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     print("\n╔══════════════════════════════════════════════════╗")
     print("║         obsidian-wiki — Agent Setup              ║")
     print("╚══════════════════════════════════════════════════╝\n")
@@ -1158,13 +1313,14 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print(f"      or edit OBSIDIAN_VAULT_PATH in {GLOBAL_CONFIG}.")
     else:
         vault_dir = Path(vault_path).expanduser()
-        vault_created = scaffold_vault(vault_dir)
+        vault_created = scaffold_vault(vault_dir, timezone_name=(getattr(args, "timezone", None) or ""))
         if vault_created:
             print(f"✅  Vault created at {vault_dir}")
         else:
             print(f"✅  Vault verified at {vault_dir}")
+        _maybe_set_timezone(vault_dir, getattr(args, "timezone", None), vault_created)
 
-    if not args.project_only:
+    if not args.project_only and not vault_only:
         print()
         install_global_skills(mode)
 
@@ -1173,15 +1329,15 @@ def cmd_setup(args: argparse.Namespace) -> int:
         install_project(project_dir, mode)
 
     sync_configured = False
-    if vault_path and Path(vault_path).expanduser().is_dir():
+    if not vault_only and vault_path and Path(vault_path).expanduser().is_dir():
         sync_configured = _maybe_configure_sync(Path(vault_path).expanduser(), args.remote)
 
     # Register the session hooks here rather than as a separate step someone
     # has to know about. Without them the vault, the CLI and the MCP tools all
     # work, but no memory is injected at session start — which is the whole
     # point. Opt out with --no-hooks.
-    hooks_line = "skipped (--no-hooks)"
-    if not args.no_hooks:
+    hooks_line = "skipped (--vault-only)" if vault_only else "skipped (--no-hooks)"
+    if not args.no_hooks and not vault_only:
         try:
             from obsidian_wiki import hooks as _hooks
 
@@ -1195,10 +1351,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
         except Exception as exc:  # never fail setup over an optional extra
             hooks_line = f"could not register ({exc}) — run `obsidian-wiki hooks install`"
 
-    n = len(list_skills())
     print("\n───────────────────────────────────────────────────")
     print(" Setup complete!\n")
-    print(f" Skills installed: {n}  (mode: {'copy' if _SYMLINK_FALLBACK else mode})")
+    if vault_only:
+        print(" Skills installed: skipped (--vault-only)")
+    else:
+        print(f" Skills installed: {len(list_skills())}  (mode: {'copy' if _SYMLINK_FALLBACK else mode})")
     if vault_path:
         print(f" Vault:            {vault_path}")
     print(f" Writing profile:  {writing_profile.resolve()}")
@@ -1529,6 +1687,33 @@ def cmd_cache_check(args: argparse.Namespace) -> int:
     else:
         print(json.dumps(result))
     return 0
+
+
+def cmd_ingest_guard(args: argparse.Namespace) -> int:
+    from obsidian_wiki.batch import discover_sources
+    from obsidian_wiki.ingest_guard import guard_sources
+    vault = Path(args.vault).expanduser().resolve()
+    sources: list[Path] = []
+    for raw in args.sources:
+        source = _resolve_source_arg(vault, raw)
+        if source.is_dir():
+            sources.extend(Path(item["path"]) for item in discover_sources(source, vault=vault))
+        else:
+            sources.append(source)
+    result = guard_sources(vault, sources)
+    print(json.dumps(result, indent=2) if args.pretty else json.dumps(result))
+    # Exit 2 when any source is blocked, so the ingest skill can stop on it.
+    return 2 if result["blocked"] else 0
+
+
+def cmd_projects_check(args: argparse.Namespace) -> int:
+    from obsidian_wiki.cache import check_projects
+    vault = Path(args.vault).expanduser().resolve()
+    result = check_projects(vault)
+    print(json.dumps(result, indent=2) if args.pretty else json.dumps(result))
+    # Exit 2 on a real staleness finding so a scheduled run can branch on it;
+    # unavailable/unsynced are absences of evidence, not findings.
+    return 2 if (result["behind"] or result["unreachable"]) else 0
 
 
 def cmd_cache_update(args: argparse.Namespace) -> int:
@@ -2155,6 +2340,7 @@ def cmd_trust_record(args: argparse.Namespace) -> int:
     try:
         if args.all:
             removed_not_applicable: list[str] = []
+            removed_ignored = 0
             if path.is_file():
                 previous = check_trust_ledger(
                     vault,
@@ -2169,6 +2355,7 @@ def cmd_trust_record(args: argparse.Namespace) -> int:
                     if item.get("reason")
                     == "confidence_not_applicable_but_ledger_entry_exists"
                 )
+                removed_ignored = previous["ignored_entries"]
             ledger = build_trust_ledger(
                 vault,
                 reviewed_at=args.reviewed_at,
@@ -2176,6 +2363,7 @@ def cmd_trust_record(args: argparse.Namespace) -> int:
                 required_trust_keys=schema["required_trust_fields"],
             )
             ledger["removed_not_applicable"] = removed_not_applicable
+            ledger["removed_ignored"] = removed_ignored
             recorded_pages = len(ledger["pages"])
         else:
             ledger = update_trust_ledger(
@@ -2200,6 +2388,7 @@ def cmd_trust_record(args: argparse.Namespace) -> int:
         "recorded_pages": recorded_pages,
         "not_applicable_pages": list(ledger.get("not_applicable", [])),
         "removed_not_applicable": list(ledger.get("removed_not_applicable", [])),
+        "removed_ignored": ledger["removed_ignored"],
         "reviewed_at": args.reviewed_at,
         "method": ledger["method"],
         "schema": {
@@ -2231,6 +2420,8 @@ def cmd_trust_record(args: argparse.Namespace) -> int:
                 f"base_confidence is not applicable: {removed}",
                 file=sys.stderr,
             )
+        if result["removed_ignored"]:
+            print(f"ignored ledger entries removed: {result['removed_ignored']}")
     return 0
 
 
@@ -2426,6 +2617,46 @@ def _memory_takeaways(raw: str | None) -> str | None:
     return sys.stdin.read().strip() if raw == "-" else raw
 
 
+def _timezone_report(plan: dict, *, verbose: bool, applied: bool) -> list:
+    """Human form of a timezone migration plan or result."""
+    name = plan["timezone"]
+    files, count, stamps = plan["files"], plan["file_count"], plan["stamp_count"]
+    would = "" if applied else "would "
+    lines = []
+    if applied:
+        key = " (recorded in index.md)" if plan.get("key_set") else ""
+        lines.append(f"timezone: {name}{key}")
+        if plan.get("backup_dir"):
+            lines.append(f"backed up {len(plan['backup'])} file(s) to {plan['backup_dir']}")
+    else:
+        current = plan.get("key_current", "")
+        key = "" if current == name else (" (not yet in index.md; --apply records it)" if not current else f" (index.md says {current}; --apply changes it)")
+        lines.append(f"timezone: {name}{key}")
+    lines.append(
+        f"{count} file(s), {stamps} stamp(s) {would}change; "
+        f"{plan['naive_skipped']} naive stamp(s) and {plan['bare_dates']} bare date(s) left alone"
+    )
+    shown = files if verbose else files[:40]
+    for entry in shown:
+        lines.append(f"  {entry['path']:<60} {len(entry['stamps'])}")
+        samples = entry["stamps"] if verbose else entry["stamps"][:2]
+        for change in samples:
+            lines.append(f"    {change['line']:>5}: {change['old']}  ->  {change['new']}")
+        if not verbose and len(entry["stamps"]) > 2:
+            lines.append(f"    … {len(entry['stamps']) - 2} more in this file")
+    if len(files) > len(shown):
+        lines.append(f"  … {len(files) - len(shown)} more file(s); --verbose lists every file and stamp, --json has them all")
+    if applied:
+        lines.append(plan["log_line"])
+    elif count:
+        lines += [
+            "",
+            "Every file touched is copied to _archives/pre-timezone-migration-<stamp>/ first; --skip GLOB excludes a file.",
+            f"Apply with: obsidian-wiki memory timezone{' ' + name if plan.get('key_current') != name else ''} --apply",
+        ]
+    return lines
+
+
 def cmd_memory(args: argparse.Namespace) -> int:
     """Maintain the vault memory surface: log, index, hot cache, profile, todos.
 
@@ -2433,6 +2664,7 @@ def cmd_memory(args: argparse.Namespace) -> int:
     all of it under a single advisory lock so a parallel writer cannot drop an
     update. `--check` reports drift and exits 2 without writing, for CI.
     """
+    from obsidian_wiki import clock
     from obsidian_wiki import memory as mem
 
     context = _resolve_schema_command_context(args.vault)
@@ -2452,12 +2684,17 @@ def cmd_memory(args: argparse.Namespace) -> int:
 
     try:
         action = args.memory_action
+        if args.operation_id and action != "sync":
+            raise ValueError("--operation-id is supported only by memory sync")
+        if args.expect_takeaways_sha256 and action not in ("hot", "sync"):
+            raise ValueError("--expect-takeaways-sha256 is supported only by memory hot/sync")
 
         if action == "status":
             status = mem.memory_status(vault)
             drift = status["index_drift"]
             return emit(status, [
                 f"vault:    {status['vault']}",
+                f"timezone: {status['timezone']}",
                 f"pages:    {status['pages']}",
                 f"index:    {'stale' if drift['stale'] else 'current'}"
                 + (f" (+{len(drift['added'])} / -{len(drift['removed'])})" if drift["stale"] else ""),
@@ -2471,6 +2708,28 @@ def cmd_memory(args: argparse.Namespace) -> int:
                 f"todos:    {status['todos']['open']} open, {status['todos']['stale']} stale,"
                 f" {status['todos']['closed']} closed",
             ])
+
+        if action == "now":
+            # The stamp a skill should write into a page: the vault's own zone,
+            # so an agent never has to know which .env it resolved.
+            tz = clock.wiki_timezone(vault)
+            payload = {
+                "timestamp": clock.stamp(tz),
+                "date": clock.today(tz),
+                "timezone": clock.timezone_name(vault) or "UTC",
+            }
+            return emit(payload, [payload["date"] if args.date else payload["timestamp"]])
+
+        if action == "timezone":
+            zone = rest[0] if rest else ""
+            skip = list(args.skip or [])
+            if args.check or not args.apply:
+                plan = mem.timezone_migration_plan(vault, zone, skip=skip)
+                lines = _timezone_report(plan, verbose=args.verbose, applied=False)
+                emit(plan, lines)
+                return 2 if plan["file_count"] else 0
+            result = mem.migrate_timezone(vault, zone, skip=skip)
+            return emit(result, _timezone_report(result, verbose=args.verbose, applied=True))
 
         if action == "migrate":
             if args.check or not args.apply:
@@ -2534,6 +2793,7 @@ def cmd_memory(args: argparse.Namespace) -> int:
                 vault,
                 write=not args.check,
                 takeaways=_memory_takeaways(args.takeaways),
+                expected_takeaways_sha256=args.expect_takeaways_sha256,
                 link_format=link_format,
                 max_words=args.max_words,
             )
@@ -2572,28 +2832,17 @@ def cmd_memory(args: argparse.Namespace) -> int:
             verb, fields = _verb_and_fields(rest, args.verb, args.field)
             index = hot = None
             skipped = ""
-            with mem.memory_lock(vault):
-                line = mem.append_log(vault, verb, fields, lock=False) if verb else ""
-                try:
-                    index = mem.rebuild_index(vault, link_format=link_format, lock=False)
-                    hot = mem.rebuild_hot(
-                        vault,
-                        lock=False,
-                        takeaways=_memory_takeaways(args.takeaways),
-                        link_format=link_format,
-                        max_words=args.max_words,
-                    )
-                except mem.MemoryError_ as exc:
-                    # An unmigrated vault must not fail the whole ingest: the
-                    # log line already landed and is append-only. Say so loudly
-                    # instead, so it is not silently skipped forever.
-                    if exc.code != "unmigrated":
-                        raise
-                    skipped = str(exc)
+            synced = mem.sync_memory(
+                vault, verb, fields, takeaways=_memory_takeaways(args.takeaways),
+                expected_takeaways_sha256=args.expect_takeaways_sha256,
+                link_format=link_format, max_words=args.max_words, operation_id=args.operation_id, check=args.check,
+            )
+            line, index, hot, skipped = (synced[k] for k in ("line", "index", "hot", "skipped"))
             if skipped:
                 print(f"warning: index.md and hot.md not updated — {skipped}", file=sys.stderr)
             payload = {
                 "log_line": line,
+                "already_applied": synced["already_applied"],
                 "skipped": skipped,
                 "index": None if index is None else {
                     "total": index.total, "added": list(index.added), "removed": list(index.removed),
@@ -2604,6 +2853,8 @@ def cmd_memory(args: argparse.Namespace) -> int:
             if index is not None and hot is not None:
                 lines.append(f"index: {index.total} page(s), +{len(index.added)} / -{len(index.removed)}")
                 lines.append(f"hot:   {hot.words} words" + (" (trimmed)" if hot.trimmed else ""))
+            elif synced["already_applied"]:
+                lines.append("memory operation already applied; no writes")
             else:
                 lines.append("index/hot: skipped (run `obsidian-wiki memory migrate`)")
             return emit(payload, lines)
@@ -2614,7 +2865,12 @@ def cmd_memory(args: argparse.Namespace) -> int:
                 facts = mem.load_profile(vault)
                 return emit(
                     {"facts": [f.__dict__ for f in facts]},
-                    [f"{f.key}: {f.value}  ({f.confidence:.2f}, {f.source}, {f.updated})" for f in facts]
+                    [
+                        f"{f.key}: {f.value}  ({f.confidence:.2f}, {f.source}, {f.updated}"
+                        + (f", until {f.until}{' — expired' if f.is_expired() else ''}" if f.until else "")
+                        + ")"
+                        for f in facts
+                    ]
                     or ["no profile facts recorded"],
                 )
             if sub_action == "set":
@@ -2623,7 +2879,7 @@ def cmd_memory(args: argparse.Namespace) -> int:
                     return 1
                 fact = mem.set_fact(
                     vault, rest[1], " ".join(rest[2:]),
-                    confidence=args.confidence, source=args.source,
+                    confidence=args.confidence, source=args.source, until=args.until or "",
                 )
                 return emit({"fact": fact.__dict__}, [f"set {fact.key}: {fact.value} ({fact.confidence:.2f})"])
             if sub_action == "forget":
@@ -2680,6 +2936,27 @@ def cmd_memory(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_mcp(args: argparse.Namespace) -> int:
+    """Serve the vault's memory tools over stdio, for agents that launch MCP servers."""
+    from obsidian_wiki.client import MemoryError_, resolve_vault
+
+    try:
+        vault = resolve_vault(args.vault)
+    except MemoryError_ as exc:
+        print(f"obsidian-wiki mcp: {exc}", file=sys.stderr)
+        return 1
+    os.environ["OBSIDIAN_VAULT_PATH"] = str(vault)
+    # stdio opens no network listener, so the HTTP server's API key guards nothing here.
+    os.environ["WIKI_ALLOW_ANONYMOUS"] = "1"
+    try:
+        from obsidian_wiki import server
+    except ImportError:
+        print("obsidian-wiki mcp needs the server extra: pip install 'obsidian-wiki[server]'", file=sys.stderr)
+        return 1
+    server.mcp.run("stdio")
+    return 0
+
+
 def cmd_hooks(args: argparse.Namespace) -> int:
     """Register, remove, or inspect the Claude Code session hooks.
 
@@ -2713,17 +2990,21 @@ def cmd_hooks(args: argparse.Namespace) -> int:
             for entry in entries:
                 healthy = entry.registered and entry.bundled and entry.executable
                 detail = ("registered" if entry.registered else "NOT registered")
+                if not entry.registered and entry.event in hk.OPT_IN:
+                    healthy = bool(entry.bundled and entry.executable)
+                    detail += " (opt-in)"
                 if not entry.bundled:
                     detail += ", script not bundled"
                 elif not entry.executable:
                     detail += ", not executable"
-                lines.append(f"{'ok ' if healthy else '-- '}{entry.event:13} {entry.script:24} {detail}")
+                lines.append(f"{'ok ' if healthy else '-- '}{entry.event:16} {entry.script:24} {detail}")
             if reach["reachable"]:
                 lines.append("ok  reachable      " + (reach["console_script"] or "python3 -m obsidian_wiki.cli"))
             else:
                 lines.append(f"--  NOT reachable  {reach['hint']}")
             payload = {"hooks": [e.__dict__ for e in entries], "reachability": reach}
-            rc = 0 if all(e.registered for e in entries) and reach["reachable"] else 1
+            required = [e for e in entries if e.event not in hk.OPT_IN]
+            rc = 0 if all(e.registered for e in required) and reach["reachable"] else 1
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -2758,6 +3039,31 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
         print(json.dumps(pack, indent=2 if args.pretty else None))
     else:
         print(render_markdown(pack), end="")
+    return 0
+
+
+def cmd_recall(args: argparse.Namespace) -> int:
+    """Print a few notes relevant to a prompt, or nothing; the per-prompt hook's backend."""
+    from obsidian_wiki.context_pack import ContextError, recall_brief
+
+    prompt = args.prompt or ""
+    if args.hook:
+        # Claude Code's UserPromptSubmit payload: {"prompt": "...", ...} on stdin.
+        try:
+            payload = json.loads(sys.stdin.read() or "{}")
+        except json.JSONDecodeError:
+            return 0
+        prompt = str(payload.get("prompt", "")) if isinstance(payload, dict) else ""
+    vault = _resolve_context_pack_vault(args.vault)
+    if vault is None:
+        return 1
+    try:
+        brief = recall_brief(vault, prompt, max_notes=args.max_notes, max_chars=args.max_chars)
+    except ContextError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if brief:
+        print(brief)
     return 0
 
 
@@ -2814,6 +3120,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-V", "--version", action="version", version=f"obsidian-wiki {__version__}")
     sub = p.add_subparsers(dest="command")
 
+    hi = sub.add_parser("install-hermes", help="install skills using the profile-scoped Hermes Skills Hub")
+    hi.add_argument("--hermes-home", metavar="PATH", help="existing profile home (default: HERMES_HOME)")
+    hi.add_argument("--source", default="Ar9av/obsidian-wiki", help="GitHub owner/repo to track for updates")
+    hi.add_argument("--skill", action="append", metavar="NAME", help="install only this skill; repeatable")
+    hi.add_argument("--dry-run", action="store_true", help="print target and commands without writes")
+    hi.add_argument("--yes", action="store_true", help="skip native confirmation, never security scans")
+    from obsidian_wiki.hermes_install import install as install_hermes
+    hi.set_defaults(func=lambda args: install_hermes(args, list_skills()))
+
     sp = sub.add_parser("setup", help="install skills into your agents and write config (default)")
     _add_setup_args(sp)
     sp.set_defaults(func=cmd_setup)
@@ -2835,6 +3150,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     ip = sub.add_parser("info", help="show install paths, version, and config")
     ip.set_defaults(func=cmd_info)
+
+    uc = sub.add_parser(
+        "update-check",
+        help="print one line if a newer obsidian-wiki is on PyPI (checked at most daily)",
+    )
+    uc.set_defaults(func=cmd_update_check)
 
     gq = sub.add_parser(
         "graph-query",
@@ -2971,6 +3292,23 @@ def build_parser() -> argparse.ArgumentParser:
     cc.add_argument("--pretty", action="store_true", help="pretty-print JSON output")
     cc.set_defaults(func=cmd_cache_check)
 
+    ig = sub.add_parser(
+        "ingest-guard",
+        help="before an ingest write: the one page each source should create or update",
+    )
+    ig.add_argument("vault", help="path to the Obsidian vault")
+    ig.add_argument("sources", nargs="+", help="source file or directory paths about to be ingested")
+    ig.add_argument("--pretty", action="store_true", help="pretty-print JSON output")
+    ig.set_defaults(func=cmd_ingest_guard)
+
+    pc = sub.add_parser(
+        "projects-check",
+        help="check how far each project's checkout has moved past last_commit_synced",
+    )
+    pc.add_argument("vault", help="path to the Obsidian vault")
+    pc.add_argument("--pretty", action="store_true", help="pretty-print JSON output")
+    pc.set_defaults(func=cmd_projects_check)
+
     cu = sub.add_parser(
         "cache-update",
         help="record a source's current SHA-256 hash in .manifest.json after ingestion",
@@ -3002,12 +3340,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     cdu = sub.add_parser(
         "code-understand",
-        help="build a ranked code-understanding focus map for a project — CodeGraph when available, builtin AST + rg otherwise",
+        help="build a ranked code-understanding focus map for a project — CodeGraph or a Graphify graph when available, builtin AST + rg otherwise",
     )
     cdu.add_argument("--project", default=None, help="project directory (defaults to the current directory)")
     cdu.add_argument(
         "--backend",
-        choices=["auto", "builtin", "codegraph"],
+        choices=["auto", "builtin", "codegraph", "graphify"],
         default="auto",
         help="code-understanding backend (default: auto)",
     )
@@ -3232,10 +3570,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="register the SessionStart (memory recap) and Stop (capture) hooks for Claude Code",
     )
     hk.add_argument("hooks_action", choices=["install", "uninstall", "status"], help="what to do")
-    hk.add_argument("--only", choices=["SessionStart", "Stop"], help="act on one hook only")
+    hk.add_argument(
+        "--only",
+        choices=["SessionStart", "Stop", "UserPromptSubmit"],
+        help="act on one hook only; UserPromptSubmit (per-prompt recall) is opt-in and installs only this way",
+    )
     hk.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     hk.add_argument("--pretty", action="store_true", help="pretty-print JSON output")
     hk.set_defaults(func=cmd_hooks)
+
+    mc = sub.add_parser("mcp", help="serve the vault's memory tools over stdio (needs the [server] extra)")
+    mc.add_argument("--vault", help="vault path (default: resolved from .env or the global config)")
+    mc.set_defaults(func=cmd_mcp)
 
     mm = sub.add_parser(
         "memory",
@@ -3244,6 +3590,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Maintain the vault's memory: index.md, log.md, hot.md, and the _meta/ tables.",
         epilog="""examples:
   memory status                                  is the surface current?
+  memory now                                     the timestamp to write into a page
+  memory timezone America/Detroit --apply        convert every existing stamp to the zone
   memory sync INGEST source=x.pdf pages=3        log + index + hot, one lock
   memory sync                                    reconcile after writing pages
   memory recap --project myapp                   what a new session should know
@@ -3259,7 +3607,7 @@ need quoting: query="how do transformers work".""",
     )
     mm.add_argument(
         "memory_action",
-        choices=["status", "log", "index", "hot", "recap", "sync", "migrate", "profile", "todo"],
+        choices=["status", "now", "log", "index", "hot", "recap", "sync", "migrate", "timezone", "profile", "todo"],
         help="what to do",
     )
     mm.add_argument(
@@ -3267,7 +3615,7 @@ need quoting: query="how do transformers work".""",
         nargs="*",
         metavar="ARGS",
         help="sync/log: VERB then key=value pairs. profile: list|set KEY VALUE|forget KEY. "
-             "todo: list|add TEXT|done ID|drop ID|prune",
+             "todo: list|add TEXT|done ID|drop ID|prune. timezone: [ZONE]",
     )
     mm.add_argument("--vault", help="vault path or @name (defaults via CWD .env, then global config)")
     mm.add_argument("--json", action="store_true", help="emit machine-readable JSON")
@@ -3276,8 +3624,10 @@ need quoting: query="how do transformers work".""",
     mm_write = mm.add_argument_group("sync / hot")
     mm_write.add_argument(
         "--takeaways",
-        help="replace the Key Takeaways section; `-` reads it from stdin",
+        help="replace Key Takeaways (existing prose requires --expect-takeaways-sha256); `-` reads it from stdin",
     )
+    mm_write.add_argument("--expect-takeaways-sha256", help="current hot.takeaways_sha256 from memory status --json")
+    mm_write.add_argument("--operation-id", help="sync only: stable retry identity (same request is a no-op)")
     mm_write.add_argument("--max-words", type=int, help="word cap for hot/recap (default: OBSIDIAN_HOT_MAX_WORDS or 500)")
     mm_write.add_argument("--check", action="store_true", help="report drift and exit 2 without writing (CI gate)")
 
@@ -3288,14 +3638,22 @@ need quoting: query="how do transformers work".""",
     mm_profile = mm.add_argument_group("profile set")
     mm_profile.add_argument("--confidence", type=float, default=0.6, help="how sure you are, 0..1 (default: 0.6)")
     mm_profile.add_argument("--source", default="conversation", help="where the fact came from")
+    mm_profile.add_argument("--until", metavar="YYYY-MM-DD", help="time-bound fact: drop it from the recap after this date")
 
     mm_todo = mm.add_argument_group("todo")
     mm_todo.add_argument("--origin", help="originating page for `todo add`")
     mm_todo.add_argument("--stale-days", type=int, default=30, help="staleness threshold (default: 30)")
     mm_todo.add_argument("--all", action="store_true", help="include closed items in `todo list`")
 
+    mm_now = mm.add_argument_group("now")
+    mm_now.add_argument("--date", action="store_true", help="print the bare date (YYYY-MM-DD) instead of the timestamp")
+
+    mm_tz = mm.add_argument_group("timezone")
+    mm_tz.add_argument("--skip", action="append", metavar="GLOB", help="leave files matching this vault-relative glob alone; repeatable")
+    mm_tz.add_argument("--verbose", action="store_true", help="list every file and every stamp in the preview")
+
     mm_other = mm.add_argument_group("migrate / compatibility")
-    mm_other.add_argument("--apply", action="store_true", help="perform the migration (default is a preview)")
+    mm_other.add_argument("--apply", action="store_true", help="perform the migration / timezone conversion (default is a preview)")
     mm_other.add_argument("--verb", help="older form of the positional VERB")
     mm_other.add_argument(
         "--field", action="append", metavar="KEY=VALUE",
@@ -3331,10 +3689,23 @@ need quoting: query="how do transformers work".""",
     cp.add_argument("--pretty", action="store_true", help="pretty-print JSON output")
     cp.set_defaults(func=cmd_context_pack)
 
+    rc = sub.add_parser(
+        "recall",
+        help="print up to a few vault notes relevant to a prompt, or nothing when none clearly are",
+    )
+    rc.add_argument("prompt", nargs="?", help="the prompt to match; omit with --hook")
+    rc.add_argument("--vault", help="override OBSIDIAN_VAULT_PATH")
+    rc.add_argument("--hook", action="store_true", help="read a Claude Code UserPromptSubmit payload from stdin")
+    rc.add_argument("--max-notes", type=int, default=4, help="most notes to list (default: 4)")
+    rc.add_argument("--max-chars", type=int, default=900, help="character budget for the brief (default: 900)")
+    rc.set_defaults(func=cmd_recall)
+
     return p
 
 
 def _add_setup_args(sp: argparse.ArgumentParser) -> None:
+    sp.add_argument("--vault-only", action="store_true",
+                    help="initialize vault and shared wiki config only; no agent installs, hooks or sync")
     sp.add_argument("--vault", metavar="PATH", help="absolute path to your Obsidian vault")
     sp.add_argument(
         "--project",
@@ -3366,6 +3737,12 @@ def _add_setup_args(sp: argparse.ArgumentParser) -> None:
         help="GitHub (or any git host) repo URL for vault sync — skips the interactive "
         "prompt and configures it non-interactively (see also: obsidian-wiki sync-setup)",
     )
+    sp.add_argument(
+        "--timezone",
+        metavar="ZONE",
+        help="IANA zone for every timestamp the wiki writes, e.g. America/Detroit "
+        "(stored as `timezone:` in index.md; default UTC)",
+    )
 
 
 def _configure_console_output() -> None:
@@ -3395,8 +3772,11 @@ def main(argv: list[str] | None = None) -> int:
     # and `info` (which calls _check_stale itself with richer output).
     # `memory` runs from the SessionStart hook and from every write skill, and
     # `hooks` is what fixes the thing the nag is about; nagging there is noise.
-    if getattr(args, "command", None) not in ("setup", "info", "doctor", "memory", "hooks", None):
+    if getattr(args, "command", None) not in ("setup", "install-hermes", "info", "doctor", "memory", "hooks", "update-check", None):
         _check_stale()
+        line = _update_notice()
+        if line:
+            print(line, file=sys.stderr)
     try:
         return args.func(args)
     except (FileNotFoundError, RuntimeError) as exc:

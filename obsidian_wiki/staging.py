@@ -21,6 +21,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from obsidian_wiki.vault import iter_md_under, okignore_patterns, okignored
+
 STAGING_DIR = "_staging"
 RAW_DIR = "_raw"
 PATCH_SUFFIX = ".patch.md"
@@ -92,7 +94,7 @@ def _live_relative(staged_rel: Path) -> str:
     if name.endswith(PATCH_SUFFIX):
         # `concepts/foo.patch.md` describes an edit to `concepts/foo.md`.
         name = name[: -len(PATCH_SUFFIX)] + ".md"
-    return str(staged_rel.with_name(name))
+    return staged_rel.with_name(name).as_posix()
 
 
 def list_staged(vault: Path) -> list[StagedEntry]:
@@ -102,10 +104,15 @@ def list_staged(vault: Path) -> list[StagedEntry]:
     if not root.is_dir():
         return []
 
+    patterns = okignore_patterns(vault)
     entries: list[StagedEntry] = []
-    for staged in sorted(root.rglob("*.md")):
+    for staged in iter_md_under(vault, root):
         staged_rel = staged.relative_to(root)
         live_rel = _live_relative(staged_rel)
+        # The server diffs against the live page, which would print an ignored
+        # page's text for anything staged over it.
+        if okignored(Path(live_rel), patterns):
+            continue
         live = vault / live_rel
         if staged.name.endswith(PATCH_SUFFIX):
             kind = "patch"
@@ -114,7 +121,7 @@ def list_staged(vault: Path) -> list[StagedEntry]:
         stat = staged.stat()
         entries.append(
             StagedEntry(
-                staged_path=str(staged.relative_to(vault)),
+                staged_path=staged.relative_to(vault).as_posix(),
                 live_path=live_rel,
                 kind=kind,
                 staged_revision=revision(staged),
@@ -189,7 +196,7 @@ def promote(
     staged = _staged_file(vault, rel)
     if staged.name.endswith(PATCH_SUFFIX):
         raise StagingError(
-            f"{staged.relative_to(vault)} is a patch, not a whole page — "
+            f"{staged.relative_to(vault).as_posix()} is a patch, not a whole page — "
             "merge it with the wiki-stage-commit skill, then promote the result"
         )
 
@@ -209,7 +216,7 @@ def promote(
 
     return {
         "action": "promote",
-        "staged_path": str(staged.relative_to(vault)),
+        "staged_path": staged.relative_to(vault).as_posix(),
         "live_path": live_rel,
         "kind": "update" if replaced else "new",
         "revision": revision(live),
@@ -243,8 +250,8 @@ def discard(vault: Path, rel: str) -> dict[str, Any]:
 
     return {
         "action": "discard",
-        "staged_path": str(staged.relative_to(vault)),
-        "raw_path": str(raw.relative_to(vault)),
+        "staged_path": staged.relative_to(vault).as_posix(),
+        "raw_path": raw.relative_to(vault).as_posix(),
     }
 
 

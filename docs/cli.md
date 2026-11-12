@@ -15,33 +15,52 @@ Running `obsidian-wiki` with no subcommand defaults to `setup`.
 | Command | What it does |
 |---|---|
 | `setup` | Install skills into your agents and write the global config |
+| `install-hermes` | Install skills through Hermes Skills Hub into one explicit profile; native check/update provenance |
 | `info` | Show install paths, version, and resolved config |
+| `update-check` | Print one line if a newer release is on PyPI (cached; checks at most once a day) |
 | `list` | List the bundled skills |
 | `doctor` | Health-check config, vault shape, bootstrap assets, and installed skills; with `--project`, also reports the code-understanding capability section |
+| `mcp` | Serve the vault's memory tools over stdio for an agent to launch; needs the `[server]` extra (see [Deployment](deployment.md#connect-an-agent-mcp)) |
 
 ```bash
 obsidian-wiki setup --vault ~/brain
+obsidian-wiki setup --vault-only --vault ~/brain  # vault/config only; no agent skills, hooks or sync
+obsidian-wiki install-hermes --hermes-home /absolute/profile --dry-run
+obsidian-wiki install-hermes --hermes-home /absolute/profile --skill wiki-query
 obsidian-wiki setup --project .        # also install project-local skills + bootstrap files
 obsidian-wiki setup --project-only     # skip the global install (use with --project)
 obsidian-wiki setup --copy             # copy skill files instead of symlinking
 obsidian-wiki setup --remote https://github.com/you/my-wiki.git   # configure sync non-interactively
+obsidian-wiki setup --timezone America/Detroit   # stamp the wiki in this zone (timezone: in index.md)
 
 obsidian-wiki doctor --json --pretty
 obsidian-wiki doctor --vault /other/vault --project .
 obsidian-wiki doctor --strict          # exit non-zero on warnings too
 ```
 
-Commands other than `setup`, `info`, and `doctor` warn you when the install has gone stale (the package upgraded but skills weren't re-linked). Re-run `obsidian-wiki setup` to fix.
+After an upgrade, the next command other than `setup`, `info`, `doctor`, `memory`, and `hooks` refreshes the skills in every agent directory setup already installed into, in the same symlink or copy mode, and records the new version. It never adds skills to an agent you didn't set up. Those commands also print a one-line notice when a newer release is on PyPI. The check runs at most once a day, fails silently offline, and is off in CI or with `OBSIDIAN_WIKI_NO_UPDATE_CHECK=1`.
+
+### Hermes profile installation
+`install-hermes` accepts `--hermes-home` (or requires `HERMES_HOME`), repeatable
+`--skill`, `--source owner/repo`, `--yes` (confirmation only; scans still apply), and `--dry-run`. It never installs dependencies,
+adds hooks, writes wiki config, or edits Hermes hub metadata itself. Existing
+destination names are refused; use native `hermes skills check/update` for
+maintenance. `setup --vault-only` initializes the vault and existing shared wiki
+config separately, and rejects `--project`, `--project-only`, and `--remote`.
+
 
 ### Session hooks
 
 Two Claude Code hooks bracket a session: `wiki-session-recap.sh` at SessionStart injects the vault's memory, `wiki-stop-capture.sh` at Stop nudges a capture.
+
+A third, `wiki-prompt-recall.sh` at UserPromptSubmit, is opt-in: it adds up to 4 relevant note links with their summaries (about 900 characters) to a prompt, and nothing when no note clearly matches. It runs `obsidian-wiki recall --hook`. `hooks install` never adds it; register it by name.
 
 **`setup` registers both for you.** Pass `--no-hooks` to skip. The commands below are for changing your mind later, or for checking what is wired up.
 
 | Command | What it does |
 |---|---|
 | `hooks install` | Register both hooks; idempotent, appends without touching your other hooks |
+| `hooks install --only UserPromptSubmit` | Register the opt-in per-prompt recall hook |
 | `hooks uninstall` | Remove our entries and nothing else |
 | `hooks status` | Registered? Bundled? Executable? Can the hook reach the package? Exit 1 if not |
 
@@ -56,17 +75,20 @@ A malformed `settings.json` is refused rather than overwritten.
 
 ### Upgrading the framework
 
-`doctor` never checks for new releases. To upgrade, use your installer
-(`pip install -U obsidian-wiki` / `uv tool upgrade obsidian-wiki` / `pipx upgrade obsidian-wiki`)
-then re-run `obsidian-wiki setup`.
+`doctor` never checks for new releases; `obsidian-wiki update-check` does, and
+regular commands print its notice. To upgrade, use your installer
+(`pip install -U obsidian-wiki` / `uv tool upgrade obsidian-wiki` / `pipx upgrade obsidian-wiki`).
+The next command refreshes the skills already installed in your agents; run
+`obsidian-wiki setup` to add skills to an agent for the first time.
 
 ## Querying & linting
 
 | Command | What it does |
 |---|---|
 | `query <question>` | Answer a question from the configured vault's index |
-| `lint [vault]` | Find missing frontmatter, broken links, duplicates, orphans, `snapshot_mismatch` (a warning when optional `snapshots:` does not match the ledger invert — the page is reported, never rewritten, and `--strict` does not promote it), and `sources:` entries holding a machine absolute path (`machine_path_sources`, a warning — the page is reported, never rewritten). Paths listed in the vault-root `.okignore` (gitignore-style: `_inbox/`, `/notes/old`, `*.draft.md`; no `!` negation) are skipped, as they are by `graph-analyse` |
+| `lint [vault]` | Find missing frontmatter, broken links, duplicates, orphans, `snapshot_mismatch` (a warning when optional `snapshots:` does not match the ledger invert — the page is reported, never rewritten, and `--strict` does not promote it), and `sources:` entries holding a machine absolute path (`machine_path_sources`, a warning — the page is reported, never rewritten), and counts or amounts with no date on the line, such as `23 stars` or `55 customers` (`undated_claims`, a warning with page and line; dated headings, `journal/`, code, and quotes are exempt), and manifest sources whose listed pages are empty or all missing (`uncovered_sources`, a warning — a source dropped between ingest and now), and Markdown files over 1,000,000 bytes, which Obsidian can't open (`oversized_pages`, a warning with the size in bytes; `_raw/` is included, since Obsidian loads it too). Paths listed in the vault-root `.okignore` (gitignore-style: `_inbox/`, `/notes/old`, `*.draft.md`; no `!` negation) are skipped, as they are by the other commands that read pages (`query`, `graph-query`, `graph-analyse`, `context-pack`, `recall`, `trust-*`, `memory`, `staging list`, `batch-plan`, the server's search and status). It hides pages from those walks and is not access control: a path you name yourself still opens (`staging promote`, the server's `read_page`), and `sync` still commits ignored files |
 | `eval` | Score the query index against a gold set — recall@k, MRR, intent accuracy |
+| `recall [prompt]` | Print up to 4 notes relevant to a prompt as `[[link]] — summary` lines, or nothing. A note counts only when at least two prompt words match its title, aliases, tags, or summary as whole words. `--hook` reads a Claude Code UserPromptSubmit payload from stdin; `--max-notes`, `--max-chars` |
 
 ```bash
 obsidian-wiki query "what do I know about MCP security?"
@@ -86,12 +108,20 @@ Lint resolves its vault and schema together: explicit path (no config inheritanc
 
 `duplicate_stems` reports two or more pages whose filename stems are equal after slugging —
 `concepts/vector-search.md` and `entities/vector-search.md` across folders, or `Vector Search.md`
-beside `vector-search.md` inside one. The graph
-identifies a page by its bare stem, so those pages are a single node in every graph metric:
-degree, communities, betweenness, and the `graph-analyse --around` blast radius. The check keys
-on the same slug and the same page selection `graph_analysis` uses, so what it reports is exactly
-what the graph will merge — root `index.md`/`log.md`/`hot.md`/`_insights.md` are excluded, and a
-legitimate `concepts/index.md` is not.
+beside `vector-search.md` inside one. A bare `[[vector-search]]` link then means whichever page
+is nearer to the linking page, as in Obsidian, which is easy to get wrong. Pages in different
+folders are separate graph nodes (their ids become their paths, e.g. `concepts/vector-search`);
+two files in one folder that slug alike still share a node, since nothing distinguishes them. The
+check uses the same page selection as `graph_analysis` — root
+`index.md`/`log.md`/`hot.md`/`_insights.md` are excluded, and a legitimate `concepts/index.md` is not.
+
+Links resolve the way Obsidian resolves them, in every command that reads the link graph
+(`graph-analyse`, `graph-query`, `lint`): `./`/`../` relative to the linking file, then an exact
+vault path, then a path relative to the linking file's folder, then a path suffix, then the bare
+name, taking the candidate that shares the most folders with the linking page. A vault of
+per-project sub-wikis can therefore link `[[concepts/plan]]` inside each project. Links inside
+inline code or fenced blocks are not links, and `AGENTS.md`/`CLAUDE.md`/`GEMINI.md` (anywhere) and
+the root `README.md` are agent instructions, not pages.
 
 It is independent of how any link is written: the collision is between the pages, not between
 references to them, so a vault where nothing links to the stem is still reported.
@@ -101,6 +131,17 @@ while titles differ (`"Vector Search"` and `"vector-search"` slug to the same st
 
 The check warns. A vault carrying a collision moves from `pass` to `warn`, which leaves
 `obsidian-wiki lint` at exit 0 and takes `obsidian-wiki lint --strict` to exit 1.
+
+### Redirect stubs
+
+A `wiki-dedup` merge leaves a redirect stub at the secondary page's path: the stub keeps
+its original title and filename so old links stay usable, and its frontmatter carries
+`redirects_to: "[[<canonical page>]]"`. A stub is not a content page, so stubs are
+excluded from the `duplicate_titles` and `duplicate_stems` candidate sets — a successful
+merge no longer reports the pair it just created. The pointer itself is validated
+instead: a stub whose target does not resolve, points at itself, or points at another
+stub is a `redirect_issues` finding (`missing_target`, `self_reference`, or
+`redirect_chain`). Like the duplicate checks, it warns rather than fails.
 
 ### Snapshot provenance (`snapshots:`)
 
@@ -173,6 +214,12 @@ valid_from: 2024-01-01
 valid_until: 2026-03-31           # inclusive: the last day the claim held
 superseded_by: "[[gateway-envoy]]"
 ```
+
+`wiki-ingest` sets `valid_from` when the source carries its own date (its frontmatter
+`created:`/`date:`, a leading ISO date in the filename, or a dated origin like
+`conversation:2026-03-14`), so a `_raw/` note captured in March keeps March as its
+event date even when it is ingested in November. Sources without a date get no
+`valid_from`. Ingest never sets `valid_until`.
 
 A page whose `valid_until` has passed is **historical**, not wrong. It stays in the
 vault and stays in the graph — only retrieval skips it, so the same question gets
@@ -346,7 +393,9 @@ For what the surface *is* — the generated-vs-yours split, the session hooks, t
 
 | Command | What it does |
 |---|---|
-| `memory status` | Index drift, log size, hot-cache budget, profile and todo counts |
+| `memory status` | Index drift, log size, hot-cache budget, profile and todo counts, the zone in use |
+| `memory now` | The timestamp to write into a page, in the vault's own zone (`--date` for the bare date) |
+| `memory timezone [ZONE]` | Convert every existing stamp in the vault to its zone; preview by default, `--apply` with a backup |
 | `memory sync` | Log, index, and hot cache as one locked update — the post-write call |
 | `memory log VERB key=value` | Append one parseable operation line to `log.md` |
 | `memory index` | Reconcile `index.md` against the pages actually on disk |
@@ -363,10 +412,33 @@ obsidian-wiki memory sync INGEST source=papers/attention.pdf pages_created=3
 # Individually, when that is all you need.
 obsidian-wiki memory log LINT issues_found=2 orphans=1
 obsidian-wiki memory index
-obsidian-wiki memory hot --takeaways "Retrieval is lexical; precision is the weak metric."
+obsidian-wiki memory hot --takeaways "Retrieval is lexical; precision is the weak metric." --expect-takeaways-sha256 "$TAKEAWAYS_REVISION"
 
 obsidian-wiki memory status --json
 ```
+
+### Timestamps
+
+`memory now` prints the stamp a skill should write into `created:` / `updated:`: UTC in the `Z` spelling by default, or — when the frontmatter of `index.md` carries `timezone: America/Detroit` — that zone, with its own offset for the instant. `--date` prints the bare calendar day. The same clock stamps the log, `hot.md`, the `_meta/` tables, and backup directory names, and `memory status` shows the zone in use. A zone name Python cannot resolve is an error, not a UTC stamp. See [Memory Surface → Timestamps](memory.md#timestamps-and-the-vaults-timezone).
+
+```bash
+obsidian-wiki memory now            # 2026-10-10T14:40:37-04:00
+obsidian-wiki memory now --date     # 2026-10-10
+```
+
+**Converting what is already there.** Setting the key changes new writes only; `memory timezone` brings the vault's history along:
+
+```bash
+obsidian-wiki memory timezone America/Detroit            # preview: per file, what would change
+obsidian-wiki memory timezone America/Detroit --apply    # record the key, back up, convert, log
+obsidian-wiki memory timezone                            # later runs read the key from index.md
+```
+
+The preview writes nothing and exits 2 while there is work to do (the same contract as `--check`), listing each file with sample before/after stamps; `--verbose` lists every stamp, `--json` has them all. `--apply` copies the original of every file it will change to `_archives/pre-timezone-migration-<stamp>/` under the same relative path, records `timezone:` in `index.md` when you passed a zone, rewrites the files atomically under the memory lock, and appends one `TIMEZONE` line to the log.
+
+What converts: every full, zoned stamp (`…Z` or any offset) in every Markdown file — frontmatter keys, `log.md` lines, `hot.md`, page bodies, drafts in `_raw/` and `_staging/`, the adoption record — each by its own instant, so a June stamp and a December stamp get the right offsets. What stays: bare dates (`2026-10-10` has no time to convert), naive stamps (no zone, so no conversion is possible), the compact backup-directory names in log lines, `_archives/`, `_raw/_archived/` source snapshots, instruction files, `.okignore` matches, and anything that is not Markdown (`.manifest.json`, the trust ledger). Both skipped kinds are counted in the report. `--skip GLOB` (repeatable, vault-relative) excludes a file whose stamps are quoted source text. A stamp already in the zone renders identically, so running twice changes nothing; `UTC` as the zone converts back.
+
+A page in the trust ledger whose fingerprinted content changes (`created:`, body text) will show as stale on the next `trust-check`; re-record it.
 
 ### What is generated and what is yours
 
@@ -414,6 +486,8 @@ obsidian-wiki memory todo done t1
 
 They are markdown tables so Obsidian renders them and a human can edit them in place; the parser round-trips hand edits, including values containing a literal `|`. Confidence is the writer's own calibration, not a measurement. Re-adding an open thread with the same text touches it rather than duplicating it.
 
+A fact that is only true for a while takes `--until YYYY-MM-DD` — `memory profile set exams "finals this weekend" --until 2026-10-20`. Once the date passes it drops out of `memory recap`, so the next session isn't told about an exam that already happened. The row stays in the table (marked expired in `profile list`) until you `forget` it. Profiles written before the `Until` column existed parse unchanged.
+
 Staleness is **reported, never enforced**. An open item untouched for 30 days is flagged by `memory todo list` and in `memory recap`; nothing closes it on your behalf.
 
 ### Session injection
@@ -430,6 +504,8 @@ The hook never breaks session startup: a missing vault, a missing install, an em
 | `WIKI_RECAP_MAX_WORDS` | `350` | Word budget for the injected block |
 | `WIKI_RECAP_MIN_CONFIDENCE` | `0.0` | Drop profile facts below this confidence |
 | `WIKI_RECAP_TIMEOUT` | `10` | Seconds before the recap is abandoned |
+| `WIKI_PROMPT_RECALL` | *(on once registered)* | `false` silences the opt-in per-prompt recall hook |
+| `WIKI_RECALL_TIMEOUT` | `5` | Seconds before a per-prompt recall is abandoned |
 
 ## Staged writes
 
@@ -491,7 +567,7 @@ obsidian-wiki trust-record @research --all --reviewed-at <ISO> --approved --allo
 obsidian-wiki trust-check @research --allow-lifecycle active --schema-source /vault/AGENTS.md
 ```
 
-`--reviewed-at` needs a timezone. `--approved` is required and mandatory — it's your assertion that a human approved every confidence value being recorded. `trust-check --strict` is the CI/scheduled gate. `trust-record` and `trust-check` resolve the same vault-scoped schema as lint; pass the same lifecycle and required-field overrides to record and check. If the owner schema does not require `base_confidence`, pages without it are reported as `not_applicable`, excluded by `trust-record --all`, and any obsolete ledger entry is warned by `trust-check` then removed by `trust-record --page` or a rebuild. Both JSON and human-readable record output list excluded pages and removed obsolete entries; human output also emits a stderr warning when removal occurs. Required-field config accepts only `base_confidence`, `lifecycle`, `lifecycle_changed`, and `updated`; typos fail closed. Lifecycle, relationship-type, and required-field override values are stripped and empty or whitespace-only entries are rejected rather than added to an allowlist. Both commands skip tool-owned directories (dot-prefixed, `venv/`, `node_modules/`) and any path listed in the vault-root `.okignore`, so quarantine directories like `_excluded/` never enter the ledger. Without an explicit `--schema-source`, CLI overrides on an explicit vault are labeled `cli:explicit-vault`; combined CLI and config overrides use `cli+config:<resolved-config-path>`.
+`--reviewed-at` needs a timezone. `--approved` is required and mandatory — it's your assertion that a human approved every confidence value being recorded. `trust-check --strict` is the CI/scheduled gate. `trust-record` and `trust-check` resolve the same vault-scoped schema as lint; pass the same lifecycle and required-field overrides to record and check. If the owner schema does not require `base_confidence`, pages without it are reported as `not_applicable`, excluded by `trust-record --all`, and any obsolete ledger entry is warned by `trust-check` then removed by `trust-record --page` or a rebuild. Both JSON and human-readable record output list excluded pages and removed obsolete entries; human output also emits a stderr warning when removal occurs. Required-field config accepts only `base_confidence`, `lifecycle`, `lifecycle_changed`, and `updated`; typos fail closed. Lifecycle, relationship-type, and required-field override values are stripped and empty or whitespace-only entries are rejected rather than added to an allowlist. Both commands skip tool-owned directories (dot-prefixed, `venv/`, `node_modules/`) and any path listed in the vault-root `.okignore`, so quarantine directories like `_excluded/` never enter the ledger. A reviewed page that is ignored later is never named again: `trust-check` reports only how many (`ignored_entries`) and stays at `warn`, so `--strict` still fails until the next `trust-record` removes those entries and reports the count as `removed_ignored`. Without an explicit `--schema-source`, CLI overrides on an explicit vault are labeled `cli:explicit-vault`; combined CLI and config overrides use `cli+config:<resolved-config-path>`.
 
 ## Lower-level commands
 
@@ -503,11 +579,13 @@ Available for automation, scripting, and debugging. Skills call some of these in
 | `graph-analyse <vault> [--top N] [--snapshot] [--diff-against FILE]` | Graph analysis in pure Python (the graphify algorithm family): god nodes (degree), bridge pages (Brandes betweenness centrality), communities with cohesion scores, cross-community surprising connections, suggested questions, and — with `--diff-against` a previous `_insights.md` — a graph diff. Vault bookkeeping files (`index`, `log`, `hot`, `_insights`) are excluded. |
 | `graph-analyse <vault> --path A B` / `--around PAGE --depth N [--direction in\|out\|both]` | Query modes: shortest link path between two pages; N-hop neighbourhood of a page (`--direction in` = blast radius) |
 | `batch-plan <vault> <source_dir>` | Split a source directory into parallel-ingest batches, skipping unchanged files |
-| `cache-check <vault> <sources...>` | Which sources are new / modified / unchanged vs. `.manifest.json`. Vault-local sources no longer on disk are reported as `missing`; machine-local sources absent on this host (e.g. synced from another machine) are reported separately as `unavailable` |
+| `cache-check <vault> <sources...>` | Which sources are new / modified / unchanged vs. `.manifest.json`. Vault-local sources no longer on disk are reported as `missing`; machine-local sources absent on this host (e.g. synced from another machine) are reported separately as `unavailable`. Covers hashed **file** sources only — a git repo is tracked under `projects` by commit, not by hash, so use `projects-check` for those |
+| `ingest-guard <vault> <sources...>` | Read-only preflight before an ingest write. Each source name is reduced to an identity (document extensions such as `.pdf`, `.docx`, `.md` stripped, then slugged), so `report.pdf`, `_raw/report.md` and a page named `report.pdf.md` are recognised as one document. Each source is reported as `create` (no page claims the identity), `update` (exactly one page, the source's primary page, matched by stem or `title:`), or `blocked` (two or more pages; merge them with `wiki-dedup` first). `prior_sources` lists manifest keys with the same identity, and `siblings` lists other sources in the same call that share it (one document, one page). Redirect stubs are ignored. Directories are expanded like `batch-plan`. Exits 2 when any source is `blocked` |
 | `cache-update <vault> <source> [--key <pseudo-key>] [--pages <page>...]` | Record a source's SHA-256 in `.manifest.json` after ingest. The stored key is normalised to a portable form; `--key` sets it explicitly (`repo:`/`url:`/`agent:`) for sources outside the vault and `$HOME`. If `_raw/_archived/<basename>` exists, that is the stored key and the file that is hashed — even when you pass a staging `_raw/<name>.md` path |
+| `projects-check <vault> [--pretty]` | How far each `.manifest.json` `projects` entry has drifted from its checkout: `behind` (with a commit count), `current`, `unreachable` (the recorded sha no longer resolves or is no longer an ancestor — history was rewritten), `unsynced` (no `last_commit_synced` yet), `unavailable` (no usable checkout on this machine). Exits **2** when anything is `behind` or `unreachable`, so a scheduled run can branch on it; `unavailable`/`unsynced` exit 0, because an absent checkout is an absence of evidence, not a finding |
 | `cache-hash <path>` | Compute a file or directory hash (no manifest I/O) |
 | `ast-extract <path>` | Extract classes, functions, and imports from code — no LLM, no API calls |
-| `code-understand --project <dir> [--backend auto\|builtin\|codegraph] [--since <sha>] [--changed <file>...] [--max-symbols N] [--pretty]` | Emit a ranked code-understanding focus map (symbols + file:line citations) for a project; CodeGraph when available, built-in AST + rg otherwise. `--backend` beats the resolved `CODE_UNDERSTANDING_*` config (env → project `.env` → global config). Used by wiki-update Step 3b. |
+| `code-understand --project <dir> [--backend auto\|builtin\|codegraph\|graphify] [--since <sha>] [--changed <file>...] [--max-symbols N] [--pretty]` | Emit a ranked code-understanding focus map (symbols + file:line citations) for a project; CodeGraph when available, then an existing Graphify `graphify-out/graph.json`, built-in AST + rg otherwise. `--backend` beats the resolved `CODE_UNDERSTANDING_*` config (env → project `.env` → global config). Used by wiki-update Step 3b. |
 
 ```bash
 obsidian-wiki graph-query /path/to/vault "transformer architecture" --pretty
@@ -522,6 +600,7 @@ obsidian-wiki batch-plan /path/to/vault ~/research --max-mb 4 --max-files 30
 obsidian-wiki cache-check /path/to/vault ~/research/*.pdf
 obsidian-wiki cache-update /path/to/vault ~/research/paper.pdf --pages concepts/attention.md
 obsidian-wiki cache-update /path/to/vault /srv/data/report.pdf --key repo:github.com/acme/reports
+obsidian-wiki projects-check /path/to/vault --pretty
 obsidian-wiki ast-extract ./src --pretty
 obsidian-wiki code-understand --project . --since <last_commit_synced> --pretty
 ```
@@ -587,3 +666,7 @@ and medium vaults never accumulate one. It is bounded to the 3 most recent keys,
 atomically (safe under concurrent runs), and ignored if corrupt — deleting it is always
 safe. Running `graph-analyse` warms the same cache that `graph-query` reads, so a nightly
 `daily-update` removes the first-query cost entirely.
+
+## Memory preservation compatibility
+
+Existing takeaway replacements require --expect-takeaways-sha256 from hot.takeaways_sha256 in memory status --json. Overflow rejects before mutation. Optional sync --operation-id makes identical retries no-ops. See [memory contracts and recovery](memory.md#durable-takeaways-fail-closed-update-contract). Mechanical carry-forward needs no flags.

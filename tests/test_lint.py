@@ -158,6 +158,36 @@ def test_snapshot_mismatch_warns_when_field_missing(tmp_path: Path) -> None:
     )
 
 
+def _write_ignored_archive(vault: Path) -> None:
+    """`_write_archive_and_manifest`, plus a second archive `.okignore` covers."""
+    _write_archive_and_manifest(vault)
+    hidden = vault / "_raw" / "_archived" / "private" / "hidden.md"
+    hidden.parent.mkdir(parents=True, exist_ok=True)
+    hidden.write_text("# clip\n", encoding="utf-8")
+    manifest = json.loads((vault / ".manifest.json").read_text(encoding="utf-8"))
+    manifest["sources"]["_raw/_archived/private/hidden.md"] = {"pages_produced": ["concepts/alpha.md"]}
+    (vault / ".manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (vault / ".okignore").write_text("_raw/_archived/private\n", encoding="utf-8")
+
+
+def test_snapshot_mismatch_does_not_name_an_ignored_archive(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _clean_pair(vault)
+    _write_ignored_archive(vault)
+
+    rows = lint_vault(vault)["findings"]["snapshot_mismatch"]
+
+    assert [row["expected"] for row in rows] == [["_raw/_archived/a.md"]]
+
+
+def test_a_page_citing_an_ignored_archive_is_not_a_mismatch(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _clean_pair(vault, alpha_snapshots="[_raw/_archived/a.md, _raw/_archived/private/hidden.md]")
+    _write_ignored_archive(vault)
+
+    assert lint_vault(vault)["findings"]["snapshot_mismatch"] == []
+
+
 def test_snapshot_mismatch_empty_when_field_matches(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     _clean_pair(vault, alpha_snapshots="[_raw/_archived/a.md]")
@@ -677,9 +707,9 @@ def test_distributed_schema_config_contract_names_all_four_variables(tmp_path: P
     )
     env_example = (root / ".env.example").read_text(encoding="utf-8")
     configuration = (root / "docs" / "configuration.md").read_text(encoding="utf-8")
-    lint_skill = (root / ".skills" / "wiki-lint" / "SKILL.md").read_text(encoding="utf-8")
-    llm_skill = (root / ".skills" / "llm-wiki" / "SKILL.md").read_text(encoding="utf-8")
-    capture_skill = (root / ".skills" / "wiki-capture" / "SKILL.md").read_text(encoding="utf-8")
+    lint_skill = (root / "skills" / "wiki-lint" / "SKILL.md").read_text(encoding="utf-8")
+    llm_skill = (root / "skills" / "llm-wiki" / "SKILL.md").read_text(encoding="utf-8")
+    capture_skill = (root / "skills" / "wiki-capture" / "SKILL.md").read_text(encoding="utf-8")
 
     for variable in variables:
         assert variable in env_example
@@ -797,7 +827,7 @@ def test_schema_config_is_scoped_to_explicit_cwd_and_named_vaults(tmp_path: Path
 
 
 def test_correction_contract_requires_temporal_authority_and_immutable_hash_check(tmp_path: Path) -> None:
-    skill = (Path(__file__).parents[1] / ".skills" / "wiki-capture" / "SKILL.md").read_text()
+    skill = (Path(__file__).parents[1] / "skills" / "wiki-capture" / "SKILL.md").read_text(encoding="utf-8")
     for field in (
         "authority_class:",
         "verification_state:",
@@ -1199,3 +1229,168 @@ def test_lint_missing_archive_wikilink_is_broken_path(tmp_path: Path) -> None:
         "target": "_raw/_archived/ghost.md",
     } in report["findings"]["broken_links"]
 
+
+
+def test_lint_vault_warns_on_undated_counts_and_skips_dated_ones(tmp_path: Path) -> None:
+    page = _page(tmp_path, "projects/alpha.md", links=["journal/today"])
+    page.write_text(
+        page.read_text(encoding="utf-8")
+        + "\n".join(
+            [
+                "The repo has 23 stars, Apache-2.0.",
+                "Chrome Web Store: 69 users.",
+                "Traction: 291★ and 55+ customers.",
+                "MRR is $4,000.",
+                "GitHub: 1,754 stars (as of 2026-07-13).",
+                "3. Installs global skills.",
+                "> Quoted: 10 users.",
+                "Run `seed --users 5 users` once.",
+                "```",
+                "40 stars",
+                "```",
+                "## 2026-07-01 snapshot",
+                "12 open deals.",
+                "## Later",
+                "8 subscribers.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    journal = _page(tmp_path, "journal/today.md", links=["projects/alpha"])
+    journal.write_text(journal.read_text(encoding="utf-8") + "500 downloads.\n", encoding="utf-8")
+
+    report = lint_vault(tmp_path, require_trust_ledger=False)
+    claims = report["findings"]["undated_claims"]
+
+    assert [claim["text"] for claim in claims] == [
+        "The repo has 23 stars, Apache-2.0.",
+        "Chrome Web Store: 69 users.",
+        "Traction: 291★ and 55+ customers.",
+        "MRR is $4,000.",
+        "8 subscribers.",
+    ]
+    assert all(claim["page"] == "projects/alpha.md" for claim in claims)
+    lines = page.read_text(encoding="utf-8").splitlines()
+    assert all(lines[claim["line"] - 1].strip() == claim["text"] for claim in claims)
+    assert report["status"] == "warn"
+
+
+def test_uncovered_sources_reports_sources_with_no_surviving_page(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _clean_pair(vault)
+    (vault / ".manifest.json").write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {"path": "docs/kept.md", "pages_produced": ["concepts/alpha.md"]},
+                    {"path": "docs/partly.md", "pages_produced": ["concepts/beta", "concepts/gone.md"]},
+                    {"path": "docs/empty.md", "pages_produced": []},
+                    {"path": "docs/lost.md", "pages_created": ["concepts/gone.md"]},
+                    {"path": "docs/counts-only.md", "pages_created": 3},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = lint_vault(vault)
+
+    assert report["findings"]["uncovered_sources"] == [
+        {"source": "docs/empty.md", "issue": "no_pages", "missing": []},
+        {"source": "docs/lost.md", "issue": "pages_missing", "missing": ["concepts/gone.md"]},
+    ]
+    assert report["status"] == "warn"
+def _redirect_stub(vault: Path, relpath: str, target: str, *, title: str | None = None) -> Path:
+    """A wiki-dedup merge leftover: same title/stem as the canonical page,
+    with a `redirects_to:` pointer in its frontmatter."""
+    path = _page(vault, relpath, title=title)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace("\n---\n", f'\nredirects_to: "[[{target}]]"\n---\n', 1),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_lint_redirect_stub_is_not_a_duplicate(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _page(vault, "concepts/example.md", title="Example")
+    _redirect_stub(vault, "entities/example.md", "concepts/example", title="Example")
+
+    report = lint_vault(vault, require_trust_ledger=False)
+
+    assert report["findings"]["duplicate_titles"] == []
+    assert report["findings"]["duplicate_stems"] == []
+    assert report["findings"]["redirect_issues"] == []
+
+
+def test_lint_redirect_stub_with_missing_target_is_reported(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _page(vault, "concepts/example.md", title="Example")
+    _redirect_stub(vault, "entities/example.md", "concepts/gone", title="Example")
+
+    report = lint_vault(vault, require_trust_ledger=False)
+
+    assert report["findings"]["redirect_issues"] == [
+        {"page": "entities/example.md", "target": "concepts/gone", "issue": "missing_target"}
+    ]
+    # A broken stub still stays out of the duplicate checks.
+    assert report["findings"]["duplicate_titles"] == []
+    assert report["findings"]["duplicate_stems"] == []
+
+
+def test_lint_redirect_chain_is_reported(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _page(vault, "concepts/example.md", title="Example")
+    _redirect_stub(vault, "entities/example.md", "concepts/example", title="Example")
+    _redirect_stub(vault, "references/example.md", "entities/example", title="Example")
+
+    report = lint_vault(vault, require_trust_ledger=False)
+
+    assert report["findings"]["redirect_issues"] == [
+        {"page": "references/example.md", "target": "entities/example", "issue": "redirect_chain"}
+    ]
+
+
+def test_lint_two_real_pages_with_same_title_still_duplicate(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _page(vault, "concepts/example.md", title="Example")
+    _page(vault, "entities/example.md", title="Example")
+
+    report = lint_vault(vault, require_trust_ledger=False)
+
+    assert report["findings"]["duplicate_titles"] == [
+        {"title": "example", "pages": ["concepts/example.md", "entities/example.md"]}
+    ]
+    assert report["findings"]["duplicate_stems"] == [
+        {"stem": "example", "pages": ["concepts/example.md", "entities/example.md"]}
+    ]
+
+
+def test_oversized_pages_reports_markdown_obsidian_cannot_open(tmp_path: Path) -> None:
+    from obsidian_wiki.lint import OVERSIZED_PAGE_BYTES
+
+    vault = tmp_path / "vault"
+    big = _page(vault, "references/report.md", links=["concepts/alpha"])
+    big.write_text(
+        big.read_text(encoding="utf-8") + "x" * OVERSIZED_PAGE_BYTES, encoding="utf-8"
+    )
+    _clean_pair(vault)
+    # Obsidian loads `_raw/` too; hidden folders it ignores.
+    (vault / "_raw" / "_archived").mkdir(parents=True)
+    (vault / "_raw" / "_archived" / "dump.md").write_text("y" * (OVERSIZED_PAGE_BYTES + 1))
+    (vault / ".trash").mkdir()
+    (vault / ".trash" / "old.md").write_text("z" * (OVERSIZED_PAGE_BYTES + 1))
+    (vault / "_raw" / "at-limit.md").write_text("w" * OVERSIZED_PAGE_BYTES)
+
+    report = lint_vault(vault, require_trust_ledger=False)
+
+    assert report["findings"]["oversized_pages"] == [
+        {"page": "_raw/_archived/dump.md", "bytes": OVERSIZED_PAGE_BYTES + 1},
+        {"page": "references/report.md", "bytes": big.stat().st_size},
+    ]
+    assert [name for name, count in report["stats"]["findings"].items() if count] == [
+        "oversized_pages"
+    ]
+    assert report["status"] == "warn"
