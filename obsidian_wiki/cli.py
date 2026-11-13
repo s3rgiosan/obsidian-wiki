@@ -1881,6 +1881,26 @@ def _read_config_file(path: Path) -> dict[str, str]:
     return values
 
 
+def _instance_config() -> tuple[Path, dict[str, str]] | None:
+    """Return the global config whose ``CLAUDE_HISTORY_PATH`` is ``$CLAUDE_CONFIG_DIR``.
+
+    A non-default Claude instance runs with ``$CLAUDE_CONFIG_DIR`` set, and
+    setup records that path in the instance's ``config`` or
+    ``config.<profile>``. The paths must be equal: ``~/.claude-work`` does not
+    match ``~/.claude-work-old``.
+    """
+    instance = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if not instance:
+        return None
+    wanted = os.path.normpath(os.path.expanduser(instance))
+    for path in sorted(GLOBAL_CONFIG_DIR.glob("config*")):
+        config = _read_config_file(path)
+        recorded = config.get("CLAUDE_HISTORY_PATH", "")
+        if recorded and os.path.normpath(os.path.expanduser(recorded)) == wanted:
+            return path, config
+    return None
+
+
 def _report_empty_local_vault(env_file: Path | str) -> None:
     # An empty OBSIDIAN_VAULT_PATH= in a project .env deliberately blocks the
     # global vault, but a copied .env.example does the same by accident, so
@@ -1910,6 +1930,10 @@ def _resolve_schema_command_context(
         config = {}
         config_source = "explicit-vault"
         resolved = vault_arg
+    elif (instance := _instance_config()) is not None:
+        path, config = instance
+        config_source = str(path)
+        resolved = config.get("OBSIDIAN_VAULT_PATH", "")
     else:
         current = Path.cwd().resolve()
         config = {}

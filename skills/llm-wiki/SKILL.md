@@ -612,9 +612,14 @@ find_config() {
     echo ""; return   # named vault missing → caller reports + lists, no fallback
   fi
   if [[ -n "$CLAUDE_CONFIG_DIR" ]]; then
+    # Exact match: ~/.claude-work must not match ~/.claude-work-old.
+    local want="${CLAUDE_CONFIG_DIR/#\~/$HOME}" rec
+    want="${want%/}"
     for c in "$config_dir"/config*; do
       [[ -f "$c" ]] || continue
-      grep -q "CLAUDE_HISTORY_PATH=.*${CLAUDE_CONFIG_DIR%/}" "$c" && { echo "$c"; return; }
+      rec=$(grep -E '^CLAUDE_HISTORY_PATH=' "$c" | tail -n 1 | cut -d= -f2- | tr -d "\"'")
+      rec="${rec/#\~/$HOME}"
+      [[ -n "$rec" && "${rec%/}" == "$want" ]] && { echo "$c"; return; }
     done
   fi
   dir="$PWD"

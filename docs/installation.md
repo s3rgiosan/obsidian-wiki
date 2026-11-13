@@ -251,7 +251,7 @@ Each Claude Code instance (one per `CLAUDE_CONFIG_DIR`) can have its own vault. 
 - **`obsidian-wiki setup`** — run it from the instance (or with `CLAUDE_CONFIG_DIR` exported). Skills install into `$CLAUDE_CONFIG_DIR/skills/`, and the config records it as `CLAUDE_HISTORY_PATH`.
 - **`setup.sh`** — set `CLAUDE_HISTORY_PATH` to the instance directory and `CLAUDE_PROFILE` to a name in `.env`. Setup writes `config.<profile>` and installs the portable skills into that instance.
 
-At runtime, skills match `$CLAUDE_CONFIG_DIR` against each config's `CLAUDE_HISTORY_PATH` and use that config's vault.
+At runtime, skills, the `obsidian-wiki` CLI, the Python client, and the SessionStart recap hook match `$CLAUDE_CONFIG_DIR` against each config's `CLAUDE_HISTORY_PATH` and use that config's vault. The match is exact: `~/.claude-work` does not match `~/.claude-work-old`.
 
 ## Verifying the install
 

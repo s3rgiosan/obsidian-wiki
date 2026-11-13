@@ -106,7 +106,8 @@ def _render_messages(messages: Sequence[dict]) -> str:
 
 def resolve_vault(explicit: Optional[str] = None) -> Path:
     """Explicit path, then ``OBSIDIAN_VAULT_PATH``, then the Config Resolution
-    Protocol: a ``.env`` up the tree, then the global config."""
+    Protocol: the config of the Claude instance in ``$CLAUDE_CONFIG_DIR``, a
+    ``.env`` up the tree, then the global config."""
     if explicit:
         return Path(explicit).expanduser().resolve()
 
@@ -114,14 +115,31 @@ def resolve_vault(explicit: Optional[str] = None) -> Path:
     if from_env:
         return Path(from_env).expanduser().resolve()
 
-    def read(path: Path) -> str:
+    def read(path: Path, key: str = "OBSIDIAN_VAULT_PATH") -> str:
         if not path.is_file():
             return ""
         for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
             line = raw.strip()
-            if line.startswith("OBSIDIAN_VAULT_PATH="):
+            if line.startswith(f"{key}="):
                 return line.split("=", 1)[1].strip().strip("'\"")
         return ""
+
+    config_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "obsidian-wiki"
+    legacy = Path.home() / ".obsidian-wiki"
+    if legacy.is_dir() and not config_dir.exists():
+        config_dir = legacy
+
+    # The paths must be equal: ~/.claude-work does not match ~/.claude-work-old.
+    instance = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if instance:
+        wanted = os.path.normpath(os.path.expanduser(instance))
+        for config in sorted(config_dir.glob("config*")):
+            recorded = read(config, "CLAUDE_HISTORY_PATH")
+            if recorded and os.path.normpath(os.path.expanduser(recorded)) == wanted:
+                found = read(config)
+                if found:
+                    return Path(found).expanduser().resolve()
+                break
 
     current, home = Path.cwd().resolve(), Path.home().resolve()
     while True:
@@ -132,10 +150,6 @@ def resolve_vault(explicit: Optional[str] = None) -> Path:
             break
         current = current.parent
 
-    config_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "obsidian-wiki"
-    legacy = Path.home() / ".obsidian-wiki"
-    if legacy.is_dir() and not config_dir.exists():
-        config_dir = legacy
     found = read(config_dir / "config")
     if found:
         return Path(found).expanduser().resolve()

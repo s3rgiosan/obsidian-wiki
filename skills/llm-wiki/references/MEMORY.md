@@ -24,8 +24,10 @@ disk, and regenerates `hot.md` — all under one lock, so another writer cannot
 interleave between the three and leave a snapshot describing a vault state that
 never existed.
 
-Use `--vault <path>` (or `--vault @name`) when you are not in a directory whose
-`.env` resolves to the target vault.
+Without `--vault`, the CLI follows the Config Resolution Protocol: the config
+of the Claude instance in `$CLAUDE_CONFIG_DIR`, then a `.env` up the tree, then
+the global config. Use `--vault <path>` (or `--vault @name`) when that does not
+resolve to the target vault.
 
 ## Verbs
 

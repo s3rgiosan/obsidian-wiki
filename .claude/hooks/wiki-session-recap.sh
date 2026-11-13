@@ -30,8 +30,10 @@ case "${WIKI_SESSION_RECAP:-}" in
 esac
 
 # --- resolve the vault, following the Config Resolution Protocol ------------
-# 1. Walk up from CWD for a .env containing OBSIDIAN_VAULT_PATH, stopping at
-#    $HOME. 2. Fall back to the global config. Anything else: stay quiet.
+# 1. When $CLAUDE_CONFIG_DIR is set, use the global config whose
+#    CLAUDE_HISTORY_PATH is that path. 2. Walk up from CWD for a .env
+#    containing OBSIDIAN_VAULT_PATH, stopping at $HOME. 3. Fall back to the
+#    global config. Anything else: stay quiet.
 
 read_var() {  # read_var <file> <key>
   [[ -f "$1" ]] || return 1
@@ -44,8 +46,31 @@ read_var() {  # read_var <file> <key>
   printf '%s' "$line"
 }
 
+norm_path() {  # norm_path <path>: expand a leading ~ and drop trailing slashes
+  local path="${1/#\~/$HOME}"
+  while [[ "$path" == */ && "$path" != / ]]; do path="${path%/}"; done
+  printf '%s' "$path"
+}
+
 find_vault() {
   local dir="$PWD" value
+  local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/obsidian-wiki"
+  [[ -d "$HOME/.obsidian-wiki" ]] && config_dir="$HOME/.obsidian-wiki"
+
+  # The paths must be equal: ~/.claude-work does not match ~/.claude-work-old.
+  if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+    local wanted config recorded
+    wanted=$(norm_path "$CLAUDE_CONFIG_DIR")
+    for config in "$config_dir"/config*; do
+      recorded=$(read_var "$config" CLAUDE_HISTORY_PATH) || continue
+      [[ "$(norm_path "$recorded")" == "$wanted" ]] || continue
+      if value=$(read_var "$config" OBSIDIAN_VAULT_PATH) && [[ -n "$value" ]]; then
+        printf '%s' "$value"; return 0
+      fi
+      break
+    done
+  fi
+
   while :; do
     if value=$(read_var "$dir/.env" OBSIDIAN_VAULT_PATH) && [[ -n "$value" ]]; then
       printf '%s' "$value"; return 0
@@ -54,8 +79,6 @@ find_vault() {
     dir=$(dirname "$dir")
   done
 
-  local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/obsidian-wiki"
-  [[ -d "$HOME/.obsidian-wiki" ]] && config_dir="$HOME/.obsidian-wiki"
   if value=$(read_var "$config_dir/config" OBSIDIAN_VAULT_PATH) && [[ -n "$value" ]]; then
     printf '%s' "$value"; return 0
   fi
